@@ -1,0 +1,88 @@
+# ============================================================
+# 编译中间文件 / 构建产物
+# 仓库：AC6329C(BD19) 固件工程
+#
+# 重要：不使用 *.bin / *.fw / *.ufw 等通配忽略镜像文件。
+#   cpu/bd19/tools/ 下同时存在两类 bin：
+#     1) SDK 随附基线镜像(只读输入，必须保留跟踪，否则无法编译烧录)
+#          bd19loader.bin / p11_code.bin / cfg_tool.bin /
+#          ex_mcu*.bin / ota*.bin 等
+#     2) 本工程编译输出(应忽略)
+#          app.bin / data_code.bin / jl_isd.* / update.ufw
+#   两者同目录，通配符无法区分，故采用精确路径忽略。
+# ============================================================
+
+# ---- 通用编译中间文件 ----
+*.o
+*.obj
+*.d
+*.dep
+*.bc
+*.a
+*.lib
+*.elf
+*.map
+*.lst
+*.lst.*
+*.sym
+*.i
+*.srec
+*.s19
+*.hex
+*.axf
+*.crf
+*.bak
+*.tmp
+*.log
+*.dmd
+*.dbg
+
+# ---- IDE / 编辑器本地文件 ----
+*.swp
+*.swo
+*~
+.vscode/*
+!.vscode/tasks.json
+!.vscode/winmk.bat
+!.vscode/c_cpp_properties.json
+!.vscode/settings.json
+
+# ---- OS 生成文件 ----
+Thumbs.db
+.DS_Store
+desktop.ini
+
+# ============================================================
+# 产物目录（整目录忽略）
+# ============================================================
+objs/
+build/
+out/
+output/
+Debug/
+Release/
+*.dir/
+
+# ============================================================
+# 编译产物：精确路径忽略（仅本工程编译会覆盖的文件）
+# ============================================================
+# 顶层编译输出
+/cpu/bd19/tools/sdk.elf
+/cpu/bd19/tools/sdk.elf.*
+/cpu/bd19/tools/sdk.lst
+/cpu/bd19/tools/sdk.map
+/cpu/bd19/tools/app.bin
+/cpu/bd19/tools/data_code.bin
+
+# 烧录暂存目录里的编译产物
+#   保留：download.bat(烧录脚本)、*.key(密钥)、
+#         bd19loader.bin/p11_code.bin/cfg_tool.bin(基线)
+/cpu/bd19/tools/download/data_trans/app.bin
+/cpu/bd19/tools/download/data_trans/jl_isd.bin
+/cpu/bd19/tools/download/data_trans/jl_isd.fw
+/cpu/bd19/tools/download/data_trans/update.ufw
+
+# 
+.agents/
+
+

@@ -1,0 +1,20 @@
+{
+  "dragWithCtrl": "default",
+  "dragWithShift": "InlineLinkRelativeToHome",
+  "dragWithCtrlShift": "EmbedRelativeToHome",
+  "enableDragAndDrop": true,
+  "virtualDirectories": {
+    "project": {
+      "fc73b3ca-4bdb-45ec-b783-8176e0e43a07": {
+        "path": "D:\\A_WorkSt\\Aworkst\\99-项目"
+      }
+    }
+  },
+  "devices": {
+    "fc73b3ca-4bdb-45ec-b783-8176e0e43a07": {
+      "uuid": "fc73b3ca-4bdb-45ec-b783-8176e0e43a07",
+      "name": "DESKTOP-3HSF4DK",
+      "os": "win32"
+    }
+  }
+}
