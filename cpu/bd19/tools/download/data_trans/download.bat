@@ -9,7 +9,8 @@ copy ..\..\bd19loader.bin .
 copy ..\..\p11_code.bin .
 copy ..\..\script.ver .
 
-..\..\isd_download.exe ..\..\isd_config.ini -tonorflash -dev bd19 -boot 0x2000 -div8 -wait 300 -uboot ..\..\uboot.boot -app ..\..\app.bin ..\..\cfg_tool.bin -res ..\..\p11_code.bin -uboot_compress -format all -key 193-AC690X-B718.key
+@REM  ..\..\isd_download.exe ..\..\isd_config.ini -tonorflash -dev bd19 -boot 0x2000 -div8 -wait 300 -uboot ..\..\uboot.boot -app ..\..\app.bin ..\..\cfg_tool.bin -res ..\..\p11_code.bin -uboot_compress -format all -key 193-AC690X-B718.key
+..\..\isd_download.exe ..\..\isd_config.ini -tonorflash -dev bd19 -boot 0x2000 -div8 -wait 300 -uboot ..\..\uboot.boot -app ..\..\app.bin ..\..\cfg_tool.bin -res ..\..\p11_code.bin -uboot_compress -format all -key XYH-AC690X-D00C.key
 :: -key 193-AC690X-B718.key
 ::-reboot 2500
 

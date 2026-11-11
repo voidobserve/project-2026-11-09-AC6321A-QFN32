@@ -93,6 +93,23 @@ uint16_t WS2812FX_mode_multi_forward_same(void);
 uint16_t WS2812FX_mode_multi_back_same(void);
 
 
+/* 样机 13 个幻彩动画（规格：样机信号采集/AI-动画总规格.md），
+ * 顺序与旧协议动态模式 color_i 0~12 一一对应 */
+uint16_t
+  WS2812FX_mode_orange_inward_fill(void),
+  WS2812FX_mode_magenta_stack_up(void),
+  WS2812FX_mode_green_wave_flow(void),
+  WS2812FX_mode_orange_dot_flow(void),
+  WS2812FX_mode_white_blue_flow(void),
+  WS2812FX_mode_color_block_flow(void),
+  WS2812FX_mode_soft_white_static(void),
+  WS2812FX_mode_seven_color_breath(void),
+  WS2812FX_mode_blue_purple_breath(void),
+  WS2812FX_mode_white_breath(void),
+  WS2812FX_mode_hue_rotate_glow(void),
+  WS2812FX_mode_seven_color_jump(void),
+  WS2812FX_mode_rainbow_band_flow(void);
+
 extern void set_music_oc_trg(u8 p);   //修改灯带上升的长度
 
 

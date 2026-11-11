@@ -20,7 +20,7 @@
 
 // #define USER_DEBUG_ENABLE
 
-#define USER_DEBUG_LOG_ENABLE 1
+#define USER_DEBUG_LOG_ENABLE 0
 
 //*********************************************************************************//
 //                                 UART配置                                        //

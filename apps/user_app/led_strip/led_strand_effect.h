@@ -83,6 +83,22 @@ typedef enum
   MODE_AOWEISI_2 = 103,
   MODE_AOWEISI_3 = 104,
 
+  /* 样机 13 个幻彩动画（规格：样机信号采集/AI-动画总规格.md），
+   * 顺序与旧协议动态模式 color_i 0~12 一一对应 */
+  MODE_ORANGE_INWARD_FILL = 110,   // 00 橙色，两端向中间填充
+  MODE_MAGENTA_STACK_UP,           // 01 品红，堆积
+  MODE_GREEN_WAVE_FLOW,            // 02 绿色，阶梯流水
+  MODE_ORANGE_DOT_FLOW,            // 03 橙色，单点流水
+  MODE_WHITE_BLUE_FLOW,            // 04 白-蓝-白，流水
+  MODE_COLOR_BLOCK_FLOW,           // 05 七彩，色块流水
+  MODE_SOFT_WHITE_STATIC,          // 06 类似白色，静态
+  MODE_SEVEN_COLOR_BREATH,         // 07 多彩呼吸，从红色开始
+  MODE_BLUE_PURPLE_BREATH,         // 08 蓝紫呼吸，从蓝色开始
+  MODE_WHITE_BREATH,               // 09 类似白色呼吸
+  MODE_HUE_ROTATE_GLOW,            // 10 多彩渐变，从红色开始
+  MODE_SEVEN_COLOR_JUMP,           // 11 多彩跳变
+  MODE_RAINBOW_BAND_FLOW,          // 12 多彩渐变流水
+
 
 
 } change_type_e;

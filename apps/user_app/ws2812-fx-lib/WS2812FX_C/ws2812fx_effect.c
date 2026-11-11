@@ -4080,3 +4080,655 @@ uint16_t f_longmeteor_signle_blink(void)
     }
     return (_seg->speed / 2);
 }
+
+/* ============================ 样机 13 个幻彩动画 ============================
+ * 规格：样机信号采集/AI-动画总规格.md。
+ * 约定：
+ *   1) 灯数取 _seg_len（本工程实灯 16 颗，段起点 _seg->start 是 RGB PWM 占位）；
+ *   2) 颜色取规格里的最终字节值，仍走工程既有亮度链路（写像素时预乘全局亮度）；
+ *   3) 服务函数由 10 ms 定时器驱动，步号按已用时间推算，所以 6.6 ms 这类小于
+ *      刷新周期的步长也能保持规格周期；
+ *   4) 步长随段速度缩放：_seg->speed = 100 为规格节拍，数值越大越慢；
+ *   5) 呼吸/渐变类（07~10）切入时先把上一帧过渡到起始色，硬切类不做过渡。
+ * ========================================================================== */
+
+#define ANIM_FRAME_MS            10U    /* 服务函数刷新周期(ms) */
+#define ANIM_TRANSITION_MS       200U   /* 切入过渡时长，规格 150~300 ms 取中值 */
+#define ANIM_LEVEL_MAX           204U   /* 规格统一的满亮度 */
+#define ANIM_CHANNEL_MAX         255U   /* 8 位通道满值 */
+#define ANIM_HUE_DEGREES         360U   /* 色相一圈的角度数 */
+#define ANIM_TENTHS_PER_MS       10U    /* 1 ms = 10 个 0.1 ms */
+#define ANIM_SPEED_BASE          100U   /* 段速度基准，100 = 规格节拍 */
+#define ANIM_SPEED_MIN           20U    /* 最快 0.2 倍速 */
+#define ANIM_SPEED_MAX           500U   /* 最慢 5 倍速，与 rf433_speed_adjust 一致 */
+#define ANIM_STATIC_REFRESH_MS   500U   /* 静态画面刷新间隔(ms) */
+#define ANIM_STEP_BREATH         66U    /* 6.6 ms/步：呼吸与色相渐变(规格 §8~§11) */
+#define ANIM_STEP_49_5           495U   /* 49.5 ms/步(规格 §1 §4 §5 §6) */
+#define ANIM_STEP_50_6           506U   /* 50.6 ms/步(规格 §3 §13) */
+#define ANIM_STEP_370_8          3708U  /* 370.78 ms/步(规格 §12) */
+#define ANIM_FILL_PERIOD         7920U  /* 00 固定周期 792 ms，单位 0.1 ms */
+#define ANIM_STACK_PERIOD        66840U /* 01 固定周期 6684 ms，单位 0.1 ms */
+#define ANIM_BREATH_STEPS        202U   /* 呼吸类每段步数(规格 §8~§10) */
+#define ANIM_BREATH_HALF         101U   /* 三角波半周期(步) */
+#define ANIM_BREATH_COLORS       7U     /* 07 共 7 段颜色 */
+#define ANIM_BLUE_PURPLE_COLORS  2U     /* 08 共 2 段颜色 */
+#define ANIM_HUE_STEPS           768U   /* 色相转满一圈的步数(规格 §11) */
+#define ANIM_HUE_VALUE_PERIOD    256U   /* 明度起伏周期(步) */
+#define ANIM_HUE_VALUE_HALF      128U   /* 明度三角波半周期(步) */
+#define ANIM_HUE_VALUE_LOW       102U   /* 明度下限 */
+#define ANIM_HUE_VALUE_HIGH      204U   /* 明度上限 */
+#define ANIM_HUE_SECTOR          60U    /* HSV 六等分扇区：360/6 */
+#define ANIM_GREEN_WAVE_PHASE    2U     /* 02 图样相位偏移(规格 §3) */
+#define ANIM_BLOCK_CELLS         6U     /* 05 每种颜色占 6 格(规格 §6) */
+#define ANIM_BLOCK_SPAN          (ANIM_BREATH_COLORS * ANIM_BLOCK_CELLS)
+#define ANIM_JUMP_COLORS         7U     /* 11 共 7 种颜色(规格 §12) */
+#define ANIM_JUMP_OFFSET         2U     /* 11 色序从绿色开始，绿在色表中的序号 */
+#define ANIM_BAND_SLOTS          36U    /* 12 渐变档数(规格 §13) */
+#define ANIM_BAND_WIDTH          3U     /* 每档 3 格，整体每步移 3 格 */
+#define ANIM_BAND_SPAN           (ANIM_BAND_SLOTS * ANIM_BAND_WIDTH)
+
+/* 规格统一色序：红 橙 绿 青 蓝 品红 白（05/07/11 的取色都来自这张表） */
+static const uint8_t animation_palette[ANIM_BREATH_COLORS][3] = {
+    {204,   0,   0},   /* 红 */
+    {204,  60,   0},   /* 橙 */
+    {  0, 204,   0},   /* 绿 */
+    {  0, 204, 204},   /* 青 */
+    {  0,   0, 204},   /* 蓝 */
+    {204,   0, 204},   /* 品红 */
+    {204, 204, 204}    /* 白 */
+};
+
+/* 00：点亮与熄灭两种像素值 */
+static const uint8_t orange_fill_colors[2][3] = {
+    {  0,   0,   0},   /* 黑 */
+    {204,  60,   0}    /* 橙 */
+};
+
+/* 01：品红与熄灭两种像素值 */
+static const uint8_t magenta_colors[2][3] = {
+    {  0,   0,   0},   /* 黑 */
+    {159,   0,  84}    /* 品红 */
+};
+
+/* 02：绿通道阶梯图样，与 N 无关 */
+static const uint8_t green_wave_ramp[9] = {
+    0, 22, 44, 68, 90, 112, 136, 158, 180
+};
+
+/* 03：单颗橙点图样，与 N 无关 */
+static const uint8_t orange_dot_pattern[6][3] = {
+    {  0,   0,   0}, {  0,   0,   0}, {204,  60,   0},
+    {  0,   0,   0}, {  0,   0,   0}, {  0,   0,   0}
+};
+
+/* 04：白-蓝-白图样，与 N 无关 */
+static const uint8_t white_blue_pattern[11][3] = {
+    {  0,   0,   0}, {204, 204, 204}, {  0,   0, 204}, {  0,   0, 204},
+    {  0,   0, 204}, {  0,   0, 204}, {204, 204, 204}, {  0,   0,   0},
+    {  0,   0,   0}, {  0,   0,   0}, {  0,   0,   0}
+};
+
+/* 12：36 档彩虹渐变，空间顺序从 LED0 往外（规格 §13 原表） */
+static const uint8_t rainbow_band_table[ANIM_BAND_SLOTS][3] = {
+    {  0, 204, 101}, {  0, 204, 136}, {  0, 204, 169}, {  0, 204, 204},
+    {  0, 169, 204}, {  0, 136, 204}, {  0, 102, 204}, {  0,  68, 204},
+    {  0,  34, 204}, {  0,   0, 204}, { 34,   0, 204}, { 68,   0, 204},
+    {102,   0, 204}, {136,   0, 204}, {170,   0, 204}, {204,   0, 204},
+    {204,   0, 169}, {204,   0, 136}, {204,   0, 102}, {204,   0,  68},
+    {204,   0,  34}, {204,   0,   0}, {204,  34,   0}, {204,  68,   0},
+    {204, 102,   0}, {204, 136,   0}, {204, 170,   0}, {204, 204,   0},
+    {169, 204,   0}, {136, 204,   0}, {101, 204,   0}, { 68, 204,   0},
+    { 34, 204,   0}, {  0, 204,   0}, {  0, 204,  33}, {  0, 204,  68}
+};
+
+/* 呼吸类切入的过渡目标：先渐灭到全黑 */
+static const uint8_t animation_black[3] = {0, 0, 0};
+
+/* 当前动画的起点与切入过渡状态。WS2812FX_start() 会清零段运行时，
+ * 下一帧 counter_mode_call 回到 0，就在这里重新锁存。 */
+static uint32_t animation_start_ms;
+static uint32_t transition_start_pixels[USER_WS2812_SEGMENT_1_LEN];
+static uint32_t transition_target;
+static uint8_t transition_active;
+
+/* 段速度换算成百分数系数，100 表示规格节拍 */
+static uint16_t animation_speed_scale(void)
+{
+    uint16_t scale = _seg->speed;
+
+    if (scale < ANIM_SPEED_MIN) {
+        scale = ANIM_SPEED_MIN;
+    } else if (scale > ANIM_SPEED_MAX) {
+        scale = ANIM_SPEED_MAX;
+    }
+    return scale;
+}
+
+/* 规格字节值经全局亮度预乘后的实际像素值（与 setPixelColor 内部算法一致） */
+static uint8_t animation_bright_scaled(uint8_t channel)
+{
+    uint16_t factor = (uint16_t)Adafruit_NeoPixel_getBrightness() + 1U;
+
+    if (factor > ANIM_CHANNEL_MAX) {   /* 亮度 255：库内不缩放，颜色直出 */
+        return channel;
+    }
+    return (uint8_t)((uint16_t)channel * factor >> 8);
+}
+
+/* 起动画：transition_color 为 0 表示硬切，否则备份当前画面并锁定过渡目标色 */
+static void animation_begin(const uint8_t *transition_color)
+{
+    uint16_t i;
+
+    if (_seg_rt->counter_mode_call != 0U) {
+        return;
+    }
+
+    animation_start_ms = millis();
+    transition_active = 0U;
+    if (transition_color == 0) {
+        return;
+    }
+
+    transition_target =
+        ((uint32_t)animation_bright_scaled(transition_color[0]) << 16) |
+        ((uint32_t)animation_bright_scaled(transition_color[1]) << 8) |
+        (uint32_t)animation_bright_scaled(transition_color[2]);
+    for (i = 0; (i < _seg_len) && (i < USER_WS2812_SEGMENT_1_LEN); i++) {
+        transition_start_pixels[i] =
+            Adafruit_NeoPixel_getOriginPixelColor((uint16_t)(_seg->start + i));
+    }
+    transition_active = 1U;
+}
+
+/* 已用时间(ms) */
+static uint32_t animation_elapsed_ms(void)
+{
+    return (uint32_t)(millis() - animation_start_ms);
+}
+
+/* 已用时间换算成步号。step_tenths 是规格步长（0.1 ms 为单位），
+ * cycle 为 0 表示不按周期取模。 */
+static uint32_t animation_step(uint16_t step_tenths, uint32_t cycle)
+{
+    uint32_t scaled = (uint32_t)step_tenths * animation_speed_scale() /
+                      ANIM_SPEED_BASE;
+    uint32_t step;
+
+    if (scaled == 0U) {
+        scaled = 1U;
+    }
+    step = animation_elapsed_ms() * ANIM_TENTHS_PER_MS / scaled;
+    if (cycle != 0U) {
+        step %= cycle;
+    }
+    return step;
+}
+
+/* 把 from 颜色按 progress(0~255) 混向 to 颜色，直接写像素缓冲（不再叠亮度） */
+static void animation_mix_pixel(uint16_t index, uint32_t from, uint32_t to,
+                                uint32_t progress)
+{
+    uint32_t back = ANIM_CHANNEL_MAX - progress;
+    uint8_t red = (uint8_t)((((from >> 16) & 0xFFU) * back +
+                             ((to >> 16) & 0xFFU) * progress) / ANIM_CHANNEL_MAX);
+    uint8_t green = (uint8_t)((((from >> 8) & 0xFFU) * back +
+                               ((to >> 8) & 0xFFU) * progress) /
+                              ANIM_CHANNEL_MAX);
+    uint8_t blue = (uint8_t)(((from & 0xFFU) * back +
+                              (to & 0xFFU) * progress) / ANIM_CHANNEL_MAX);
+
+    Adafruit_NeoPixel_setPixelColor_raw(index, ((uint32_t)red << 16) |
+                                               ((uint32_t)green << 8) | blue);
+}
+
+/* 切入过渡：上一帧画面 -> 过渡目标色线性渐变，返回 1 表示本帧仍在过渡 */
+static uint8_t animation_transition(void)
+{
+    uint32_t elapsed;
+    uint32_t progress;
+    uint16_t i;
+
+    if (!transition_active) {
+        return 0U;
+    }
+
+    elapsed = animation_elapsed_ms();
+    if (elapsed >= ANIM_TRANSITION_MS) {
+        transition_active = 0U;
+        animation_start_ms = millis();   /* 过渡结束，动画从 0 相位开始 */
+        return 0U;
+    }
+
+    progress = elapsed * ANIM_CHANNEL_MAX / ANIM_TRANSITION_MS;
+    for (i = 0; (i < _seg_len) && (i < USER_WS2812_SEGMENT_1_LEN); i++) {
+        animation_mix_pixel((uint16_t)(_seg->start + i),
+                            transition_start_pixels[i], transition_target,
+                            progress);
+    }
+    return 1U;
+}
+
+/* 整条填充一个颜色（规格字节值） */
+static void animation_fill(const uint8_t color[3])
+{
+    Adafruit_NeoPixel_fill(((uint32_t)color[0] << 16) |
+                           ((uint32_t)color[1] << 8) | color[2],
+                           _seg->start, _seg_len);
+}
+
+/* 整条按 level(0~ANIM_LEVEL_MAX) 比例填充一个颜色 */
+static void animation_fill_scaled(const uint8_t color[3], uint16_t level)
+{
+    uint8_t red = (uint8_t)((uint32_t)color[0] * level / ANIM_LEVEL_MAX);
+    uint8_t green = (uint8_t)((uint32_t)color[1] * level / ANIM_LEVEL_MAX);
+    uint8_t blue = (uint8_t)((uint32_t)color[2] * level / ANIM_LEVEL_MAX);
+
+    Adafruit_NeoPixel_fill(((uint32_t)red << 16) | ((uint32_t)green << 8) | blue,
+                           _seg->start, _seg_len);
+}
+
+/* 写一颗灯（offset 是段内序号，颜色为规格字节值） */
+static void animation_set_pixel(uint16_t offset, uint8_t red, uint8_t green,
+                                uint8_t blue)
+{
+    WS2812FX_setPixelColor((uint16_t)(_seg->start + offset),
+                           ((uint32_t)red << 16) | ((uint32_t)green << 8) | blue);
+}
+
+/* 对称三角波：0 -> ANIM_LEVEL_MAX -> 0，全程 2*half 步 */
+static uint16_t animation_triangle(uint32_t step, uint16_t half)
+{
+    uint32_t phase = step % ((uint32_t)half * 2U);
+
+    if (phase > half) {
+        phase = (uint32_t)half * 2U - phase;
+    }
+    return (uint16_t)(phase * ANIM_LEVEL_MAX / half);
+}
+
+/* 取模到 [0, modulus)，负值也能得到正确索引（流水类要往两个方向回绕） */
+static uint16_t wrap_index(int32_t value, uint16_t modulus)
+{
+    int32_t remainder = value % (int32_t)modulus;
+
+    if (remainder < 0) {
+        remainder += (int32_t)modulus;
+    }
+    return (uint16_t)remainder;
+}
+
+/* 饱和度满的 HSV->RGB：hue 0~359，value 0~255 */
+static void hue_to_rgb(uint16_t hue, uint8_t value, uint8_t color[3])
+{
+    uint16_t sector = hue / ANIM_HUE_SECTOR;
+    uint16_t offset = hue % ANIM_HUE_SECTOR;
+    uint8_t rise = (uint8_t)((uint32_t)value * offset / ANIM_HUE_SECTOR);
+    uint8_t fall = (uint8_t)((uint32_t)value * (ANIM_HUE_SECTOR - offset) /
+                             ANIM_HUE_SECTOR);
+
+    switch (sector) {
+    case 0:
+        color[0] = value;
+        color[1] = rise;
+        color[2] = 0;
+        break;
+    case 1:
+        color[0] = fall;
+        color[1] = value;
+        color[2] = 0;
+        break;
+    case 2:
+        color[0] = 0;
+        color[1] = value;
+        color[2] = rise;
+        break;
+    case 3:
+        color[0] = 0;
+        color[1] = fall;
+        color[2] = value;
+        break;
+    case 4:
+        color[0] = rise;
+        color[1] = 0;
+        color[2] = value;
+        break;
+    case 5:
+        color[0] = value;
+        color[1] = 0;
+        color[2] = fall;
+        break;
+    default:
+        color[0] = 0;
+        color[1] = 0;
+        color[2] = 0;
+        break;
+    }
+}
+
+/* 01 的四阶段状态机（规格 §4.1），返回第 step 步的点亮掩码，bit i = 第 i 颗灯。
+ * 本工程固定 16 颗，掩码用 uint32_t；按时间跨步时从 0 重放到目标步，
+ * 避免丢帧导致光点动作缺失。 */
+static uint32_t magenta_mask_at(uint32_t step, uint16_t length)
+{
+    uint16_t bar = 0U;
+    uint16_t dot = (uint16_t)(length - 1U);
+    uint16_t rest = 0U;
+    uint8_t phase = 0U;
+    uint32_t mask = 0U;
+    uint32_t current;
+
+    for (current = 0; current <= step; current++) {
+        switch (phase) {
+        case 0:                        /* A 入场：空条，光点从远端走向 LED0 */
+            mask = 1UL << dot;
+            if (dot == 0U) {
+                phase = 1U;
+                bar = 1U;
+                dot = (uint16_t)(length - 1U);
+            } else {
+                dot--;
+            }
+            break;
+        case 1:                        /* B 堆积：光点送料，命中后光柱加长一格 */
+            if (dot > bar) {
+                mask = ((1UL << bar) - 1U) | (1UL << dot);
+                dot--;
+            } else {
+                mask = (1UL << (bar + 1U)) - 1U;
+                bar++;
+                dot = (uint16_t)(length - 1U);
+                if (bar >= length) {
+                    phase = 2U;
+                }
+            }
+            break;
+        case 2:                        /* C 满格：保持 1 帧 */
+            mask = (1UL << length) - 1U;
+            rest = (uint16_t)(length - 2U);
+            phase = 3U;
+            break;
+        default:                       /* D 塌陷：首帧直接掉 2 格，之后每步 1 格 */
+            mask = (1UL << rest) - 1U;
+            if (rest == 0U) {
+                phase = 0U;
+                dot = (uint16_t)(length - 1U);
+            } else {
+                rest--;
+            }
+            break;
+        }
+    }
+    return mask;
+}
+
+/* 00 橙色·两端向中间填充：周期固定 792 ms，第 t 步两端各点亮 t+1 颗，
+ * 后半程由外向内逐格收拢（规格 §1）。 */
+uint16_t WS2812FX_mode_orange_inward_fill(void)
+{
+    uint16_t length = _seg_len;
+    uint16_t half = (uint16_t)((length + 1U) / 2U);
+    uint16_t cycle = (uint16_t)(half * 2U);
+    uint16_t step_tenths = (uint16_t)(ANIM_FILL_PERIOD / cycle);
+    uint32_t step;
+    uint16_t edge;
+    uint16_t i;
+    uint8_t lit;
+
+    animation_begin(0);
+    step = animation_step(step_tenths, cycle);
+
+    for (i = 0; i < length; i++) {
+        if (step < half) {
+            lit = (uint8_t)((i <= step) || (i >= (uint16_t)(length - 1U - step)));
+        } else {
+            edge = (uint16_t)(step - half + 1U);
+            lit = (uint8_t)((i >= edge) && (i <= (uint16_t)(length - 1U - edge)));
+        }
+        animation_set_pixel(i, orange_fill_colors[lit][0],
+                            orange_fill_colors[lit][1],
+                            orange_fill_colors[lit][2]);
+    }
+    return ANIM_FRAME_MS;
+}
+
+/* 01 品红·堆积：光点从远端送料，光柱在 LED0 侧逐格长高，满格后从顶端塌陷。
+ * 步数 S = N(N+3)/2；N<=25（本工程 16 颗）时周期固定 6684 ms（规格 §2）。 */
+uint16_t WS2812FX_mode_magenta_stack_up(void)
+{
+    uint16_t length = _seg_len;
+    uint32_t cycle = (uint32_t)length * (length + 3U) / 2U;
+    uint16_t step_tenths = (uint16_t)(ANIM_STACK_PERIOD / cycle);
+    uint32_t step;
+    uint32_t mask;
+    uint16_t i;
+    uint8_t lit;
+
+    animation_begin(0);
+    step = animation_step(step_tenths, cycle);
+    mask = magenta_mask_at(step, length);
+
+    for (i = 0; i < length; i++) {
+        lit = (uint8_t)((mask >> i) & 1U);
+        animation_set_pixel(i, magenta_colors[lit][0], magenta_colors[lit][1],
+                            magenta_colors[lit][2]);
+    }
+    return ANIM_FRAME_MS;
+}
+
+/* 02 绿色·阶梯流水：9 档绿色图样向 LED14 流动，周期 9 步（规格 §3） */
+uint16_t WS2812FX_mode_green_wave_flow(void)
+{
+    uint16_t count =
+        (uint16_t)(sizeof(green_wave_ramp) / sizeof(green_wave_ramp[0]));
+    uint32_t step;
+    uint16_t i;
+
+    animation_begin(0);
+    step = animation_step(ANIM_STEP_50_6, count);
+
+    for (i = 0; i < _seg_len; i++) {
+        uint16_t index = wrap_index((int32_t)i - (int32_t)step +
+                                    (int32_t)ANIM_GREEN_WAVE_PHASE, count);
+
+        animation_set_pixel(i, 0, green_wave_ramp[index], 0);
+    }
+    return ANIM_FRAME_MS;
+}
+
+/* 03 橙色·单点流水：一颗橙点向 LED14 流动，周期 6 步（规格 §4） */
+uint16_t WS2812FX_mode_orange_dot_flow(void)
+{
+    uint16_t count =
+        (uint16_t)(sizeof(orange_dot_pattern) / sizeof(orange_dot_pattern[0]));
+    uint32_t step;
+    uint16_t i;
+    uint16_t index;
+
+    animation_begin(0);
+    step = animation_step(ANIM_STEP_49_5, count);
+
+    for (i = 0; i < _seg_len; i++) {
+        index = wrap_index((int32_t)i - (int32_t)step, count);
+        animation_set_pixel(i, orange_dot_pattern[index][0],
+                            orange_dot_pattern[index][1],
+                            orange_dot_pattern[index][2]);
+    }
+    return ANIM_FRAME_MS;
+}
+
+/* 04 白-蓝-白·流水：图样向 LED0 流动，周期 11 步（规格 §5） */
+uint16_t WS2812FX_mode_white_blue_flow(void)
+{
+    uint16_t count =
+        (uint16_t)(sizeof(white_blue_pattern) / sizeof(white_blue_pattern[0]));
+    uint32_t step;
+    uint16_t i;
+    uint16_t index;
+
+    animation_begin(0);
+    step = animation_step(ANIM_STEP_49_5, count);
+
+    for (i = 0; i < _seg_len; i++) {
+        index = wrap_index((int32_t)i + (int32_t)step, count);
+        animation_set_pixel(i, white_blue_pattern[index][0],
+                            white_blue_pattern[index][1],
+                            white_blue_pattern[index][2]);
+    }
+    return ANIM_FRAME_MS;
+}
+
+/* 05 七彩·色块流水：7 种颜色各占 6 格，共 42 步，向 LED0 流动（规格 §6） */
+uint16_t WS2812FX_mode_color_block_flow(void)
+{
+    uint32_t step;
+    uint16_t i;
+    uint16_t slot;
+
+    animation_begin(0);
+    step = animation_step(ANIM_STEP_49_5, ANIM_BLOCK_SPAN);
+
+    for (i = 0; i < _seg_len; i++) {
+        slot = (uint16_t)(wrap_index((int32_t)i + (int32_t)step,
+                                     ANIM_BLOCK_SPAN) / ANIM_BLOCK_CELLS);
+        animation_set_pixel(i, animation_palette[slot][0],
+                            animation_palette[slot][1],
+                            animation_palette[slot][2]);
+    }
+    return ANIM_FRAME_MS;
+}
+
+/* 06 类似白色·静态：全灯恒定 (204,204,204)（规格 §7） */
+uint16_t WS2812FX_mode_soft_white_static(void)
+{
+    static const uint8_t soft_white[3] = {204, 204, 204};
+
+    animation_begin(0);
+    animation_fill_scaled(soft_white, ANIM_LEVEL_MAX);
+    return ANIM_STATIC_REFRESH_MS;
+}
+
+/* 07 多彩呼吸：每段 202 步、一次呼吸换一种颜色，色序从红开始循环
+ *（规格 §8，产品语义 红橙绿青蓝品红白）。 */
+uint16_t WS2812FX_mode_seven_color_breath(void)
+{
+    uint32_t step;
+    uint16_t level;
+    uint16_t segment;
+
+    animation_begin(animation_black);
+    if (animation_transition()) {
+        return ANIM_FRAME_MS;
+    }
+
+    step = animation_step(ANIM_STEP_BREATH, 0U);
+    level = animation_triangle(step, ANIM_BREATH_HALF);
+    segment = (uint16_t)((step / ANIM_BREATH_STEPS) % ANIM_BREATH_COLORS);
+    animation_fill_scaled(animation_palette[segment], level);
+    return ANIM_FRAME_MS;
+}
+
+/* 08 蓝紫呼吸：蓝->紫两段循环，每段 202 步（规格 §9，从蓝色开始） */
+uint16_t WS2812FX_mode_blue_purple_breath(void)
+{
+    static const uint8_t breath_colors[ANIM_BLUE_PURPLE_COLORS][3] = {
+        {  0,   0, 204},   /* 蓝 */
+        {204,   0, 204}    /* 紫 */
+    };
+    uint32_t step;
+    uint16_t level;
+    uint16_t segment;
+
+    animation_begin(animation_black);
+    if (animation_transition()) {
+        return ANIM_FRAME_MS;
+    }
+
+    step = animation_step(ANIM_STEP_BREATH, 0U);
+    level = animation_triangle(step, ANIM_BREATH_HALF);
+    segment = (uint16_t)((step / ANIM_BREATH_STEPS) % ANIM_BLUE_PURPLE_COLORS);
+    animation_fill_scaled(breath_colors[segment], level);
+    return ANIM_FRAME_MS;
+}
+
+/* 09 类似白色呼吸：灰度 R=G=B 按三角波 0->204->0，周期 202 步（规格 §10） */
+uint16_t WS2812FX_mode_white_breath(void)
+{
+    static const uint8_t breath_color[3] = {204, 204, 204};
+    uint32_t step;
+    uint16_t level;
+
+    animation_begin(animation_black);
+    if (animation_transition()) {
+        return ANIM_FRAME_MS;
+    }
+
+    step = animation_step(ANIM_STEP_BREATH, 0U);
+    level = animation_triangle(step, ANIM_BREATH_HALF);
+    animation_fill_scaled(breath_color, level);
+    return ANIM_FRAME_MS;
+}
+
+/* 10 多彩渐变：色相 768 步转满一圈，明度在 102~204 之间以 256 步起伏
+ *（规格 §11）。进入时先把当前色渐变到红色起始亮度，再开始循环。 */
+uint16_t WS2812FX_mode_hue_rotate_glow(void)
+{
+    static const uint8_t entry_red[3] = {ANIM_HUE_VALUE_LOW, 0, 0};
+    uint32_t step;
+    uint16_t hue;
+    uint16_t value;
+    uint8_t color[3];
+
+    animation_begin(entry_red);
+    if (animation_transition()) {
+        return ANIM_FRAME_MS;
+    }
+
+    step = animation_step(ANIM_STEP_BREATH, 0U);
+    hue = (uint16_t)((step % ANIM_HUE_STEPS) * ANIM_HUE_DEGREES /
+                     ANIM_HUE_STEPS);
+    value = (uint16_t)(ANIM_HUE_VALUE_LOW +
+                       animation_triangle(step % ANIM_HUE_VALUE_PERIOD,
+                                          ANIM_HUE_VALUE_HALF) *
+                       (ANIM_HUE_VALUE_HIGH - ANIM_HUE_VALUE_LOW) /
+                       ANIM_LEVEL_MAX);
+    hue_to_rgb(hue, (uint8_t)value, color);
+    animation_fill(color);
+    return ANIM_FRAME_MS;
+}
+
+/* 11 多彩跳变：全条同色、每步硬跳，色序 绿青蓝品红白红橙，7 步（规格 §12） */
+uint16_t WS2812FX_mode_seven_color_jump(void)
+{
+    uint32_t step;
+    uint16_t index;
+
+    animation_begin(0);
+    step = animation_step(ANIM_STEP_370_8, ANIM_JUMP_COLORS);
+    index = (uint16_t)((step + ANIM_JUMP_OFFSET) % ANIM_JUMP_COLORS);
+    animation_fill(animation_palette[index]);
+    return ANIM_FRAME_MS;
+}
+
+/* 12 多彩渐变流水：36 档渐变、每档 3 格，整体每步向 LED14 移 3 格（规格 §13） */
+uint16_t WS2812FX_mode_rainbow_band_flow(void)
+{
+    uint32_t step;
+    uint16_t shift;
+    uint16_t i;
+    uint16_t position;
+    uint16_t slot;
+
+    animation_begin(0);
+    step = animation_step(ANIM_STEP_50_6, ANIM_BAND_SLOTS);
+    shift = (uint16_t)(step * ANIM_BAND_WIDTH);
+
+    for (i = 0; i < _seg_len; i++) {
+        position = wrap_index((int32_t)i - (int32_t)shift, ANIM_BAND_SPAN);
+        slot = (uint16_t)(position / ANIM_BAND_WIDTH);
+        animation_set_pixel(i, rainbow_band_table[slot][0],
+                            rainbow_band_table[slot][1],
+                            rainbow_band_table[slot][2]);
+    }
+    return ANIM_FRAME_MS;
+}

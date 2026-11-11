@@ -37,6 +37,8 @@ void soft_turn_off_lights(void); //软关灯处理
 void soft_turn_on_the_light(void);   //软开灯处理
 
 extern void fb_rf433_music_on_off(u8 on_off);
+/* WS2812FX.H 里只留了不带前缀的旧名字，带前缀的访问接口需要就地声明 */
+extern Segment *WS2812FX_getSegment_seg(uint8_t seg);
 
 fc_effect_t fc_effect;//幻彩灯串效果数据
 
@@ -106,7 +108,8 @@ void fc_data_init(void)
     fc_effect.music.m = 8;
     fc_effect.music.s = 100;   //灵敏度
 
-    fc_effect.color_i = 6; /* 旧动态循环：0~5效果，6~7音乐 */
+    // fc_effect.color_i = 6; /* 旧动态循环：0~5效果，6~7音乐 */
+    fc_effect.color_i = 0; 
     fc_effect.huancai_color_i = 0;
     fc_effect.rgbw_i = 0;
 
@@ -1804,6 +1807,52 @@ void legacy_rgb_mode_next(void)
     rf433_rgbw_change_mode();
 }
 
+/*************************************************** 样机 13 个幻彩动画 *****************************************************/
+/* 动画实现在 ws2812fx_effect.c 末尾；顺序与旧协议 color_i 0~12 一一对应 */
+static const mode_ptr prototype_animations[] = {
+    &WS2812FX_mode_orange_inward_fill,      /* 00 橙色，两端向中间填充 */
+    &WS2812FX_mode_magenta_stack_up,        /* 01 品红，堆积 */
+    &WS2812FX_mode_green_wave_flow,         /* 02 绿色，阶梯流水 */
+    &WS2812FX_mode_orange_dot_flow,         /* 03 橙色，单点流水 */
+    &WS2812FX_mode_white_blue_flow,         /* 04 白-蓝-白，流水 */
+    &WS2812FX_mode_color_block_flow,        /* 05 七彩，色块流水 */
+    &WS2812FX_mode_soft_white_static,       /* 06 类似白色，静态 */
+    &WS2812FX_mode_seven_color_breath,      /* 07 多彩呼吸，从红色开始 */
+    &WS2812FX_mode_blue_purple_breath,      /* 08 蓝紫呼吸，从蓝色开始 */
+    &WS2812FX_mode_white_breath,            /* 09 类似白色呼吸 */
+    &WS2812FX_mode_hue_rotate_glow,         /* 10 多彩渐变，从红色开始 */
+    &WS2812FX_mode_seven_color_jump,        /* 11 多彩跳变 */
+    &WS2812FX_mode_rainbow_band_flow        /* 12 多彩渐变流水 */
+};
+
+#define PROTOTYPE_ANIMATION_COUNT \
+    ((uint16_t)(sizeof(prototype_animations) / sizeof(prototype_animations[0])))
+
+/* 把动画挂到 WS2812 段上（本工程只有段 1 有效）。
+ * 这里不清像素缓冲：呼吸/渐变类要在切入时把上一帧过渡到起始色。 */
+static void prototype_animation_apply(mode_ptr animation)
+{
+    /* 同一个动画被重复挂载（调速、改亮度）时不要重置段运行时，
+     * 否则切入过渡会重来一次，画面多出一次暗场。 */
+    uint8_t restart = (uint8_t)(
+        (WS2812FX_getSegment_seg(USER_SEGMENT1_INDEX)->mode != animation) ||
+        !WS2812FX_isRunning());
+
+    WS2812FX_setSegment_colorOptions(
+        USER_SEGMENT1_INDEX,
+        user_led_segments[USER_SEGMENT1_INDEX].start,
+        user_led_segments[USER_SEGMENT1_INDEX].end,
+        animation,
+        0,
+        fc_effect.dream_scene.speed,
+        0);
+
+    if (restart) {
+        WS2812FX_start();
+        WS2812FX_trigger();
+    }
+}
+
 //------------------------------------------------------遥控
 
 extern uint8_t flash_flag;
@@ -2073,7 +2122,7 @@ void aws_pixels_dynamic_mode_change(u8 dir)
 
     if (CHANGE_DIR_FORWARD == dir) {
         // 下一个模式
-        if (fc_effect.color_i < 13 + 2) {
+        if (fc_effect.color_i < (PROTOTYPE_ANIMATION_COUNT + 1U)) {
             fc_effect.color_i++;
         }
     } else if (CHANGE_DIR_BACKWARD == dir) {
@@ -2083,20 +2132,18 @@ void aws_pixels_dynamic_mode_change(u8 dir)
         } else {
             // 重新设置当前模式
         }
+    }
 
-        // 根据模式索引，将幻彩灯设置为对应的动画模式
-        switch (fc_effect.color_i) {
-
-        case 14:
-            fc_effect.music.m = 8;
-            fc_effect.Now_state = IS_light_music;
-            break;
-
-        case 15:
-            fc_effect.music.m = 3;
-            fc_effect.Now_state = IS_light_music;
-            break;
-        }
+    /* 旧协议 13 个动态模式（color_i 0~12）对应样机动画 00~12，其余为声控 */
+    if (fc_effect.color_i < PROTOTYPE_ANIMATION_COUNT) {
+        fc_effect.Now_state = IS_light_scene;
+        fc_effect.dream_scene.change_type =
+            (change_type_e)(MODE_ORANGE_INWARD_FILL + fc_effect.color_i);
+    } else {
+        /* 13 对应“频谱3”、14 对应“节奏1”，与 music_effect() 的 case 一致 */
+        fc_effect.Now_state = IS_light_music;
+        fc_effect.music.m =
+            (fc_effect.color_i == PROTOTYPE_ANIMATION_COUNT) ? 8 : 3;
     }
 
     // fc_effect.Now_state 等于 IS_light_music 时，会发送music_on出去，所以在这里不需要发送music_on出去
@@ -2484,6 +2531,15 @@ void aoweisi_effect_3(void)
 /*************************************************** 情景效果调度 *****************************************************/
 static void ls_scene_effect(void)
 {
+    if ((fc_effect.dream_scene.change_type >= MODE_ORANGE_INWARD_FILL) &&
+        (fc_effect.dream_scene.change_type <
+         (change_type_e)(MODE_ORANGE_INWARD_FILL + PROTOTYPE_ANIMATION_COUNT))) {
+        prototype_animation_apply(
+            prototype_animations[fc_effect.dream_scene.change_type -
+                                 MODE_ORANGE_INWARD_FILL]);
+        return;
+    }
+
     switch (fc_effect.dream_scene.change_type)
     {
     case MODE_MUTIL_RAINBOW:      //彩虹
