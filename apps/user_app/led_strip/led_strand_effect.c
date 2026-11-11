@@ -1834,6 +1834,7 @@ enum
 // 幻彩灯动态模式切换
 void aws_pixels_dynamic_mode_change(u8 dir)
 {
+#if 0
     if (fc_effect.led_on_off_flag == DEVICE_OFF && fc_effect.led1_on_off_flag == DEVICE_OFF)
         return;
 
@@ -2064,12 +2065,53 @@ void aws_pixels_dynamic_mode_change(u8 dir)
         fb_rf433_music_on_off(0);
     set_fc_effect();
     save_user_data_area3();
+#endif
+
+    if (fc_effect.led_on_off_flag == DEVICE_OFF) {
+        return;
+    }
+
+    if (CHANGE_DIR_FORWARD == dir) {
+        // 下一个模式
+        if (fc_effect.color_i < 13 + 2) {
+            fc_effect.color_i++;
+        }
+    } else if (CHANGE_DIR_BACKWARD == dir) {
+        // 上一个模式
+        if (fc_effect.color_i > 0) {
+            fc_effect.color_i--;
+        } else {
+            // 重新设置当前模式
+        }
+
+        // 根据模式索引，将幻彩灯设置为对应的动画模式
+        switch (fc_effect.color_i) {
+
+        case 14:
+            fc_effect.music.m = 8;
+            fc_effect.Now_state = IS_light_music;
+            break;
+
+        case 15:
+            fc_effect.music.m = 3;
+            fc_effect.Now_state = IS_light_music;
+            break;
+        }
+    }
+
+    // fc_effect.Now_state 等于 IS_light_music 时，会发送music_on出去，所以在这里不需要发送music_on出去
+    if (fc_effect.Now_state != IS_light_music) {
+        fb_rf433_music_on_off(0);
+    }
+    set_fc_effect();
+    save_user_data_area3();
 }
 
 /* 旧协议的WS2812模式循环固定为6个动态效果+2个音乐效果。
  * 新工程的额外效果仍可保留，但不会由旧UART/433循环进入。 */
 static void legacy_ws_mode_apply(void)
 {
+#if 0
     fc_effect.color_i %= 8;
     if (fc_effect.color_i < 6) {
         fc_effect.Now_state = IS_light_scene;
@@ -2082,12 +2124,45 @@ static void legacy_ws_mode_apply(void)
     fb_rf433_music_on_off(1);
     set_fc_effect();
     save_user_data_area3();
+    
+#endif
+
+    // 检查幻彩灯的动画索引值是否在范围内，若不在，恢复到默认值0
+    if (fc_effect.color_i >= 13 + 2) {
+        // 样机的 13 种模式 + 原本的 2 种声控模式
+        fc_effect.color_i = 0;
+    }
+
+    if (fc_effect.color_i < 13) { 
+        // 0 ~ 12，样机对应的幻彩灯动画
+        fc_effect.Now_state = IS_light_scene;
+    } else {
+        // 13 ~ 14，声控模式
+        fc_effect.Now_state = IS_light_music;
+    }
+
+    aws_pixels_dynamic_mode_change(CHANGE_DIR_STAND);
+    fb_rf433_music_on_off(1);
+    set_fc_effect(); 
+    save_user_data_area3();
 }
 
 void legacy_ws_mode_next(void)
 {
+#if 0
     fc_effect.color_i = (fc_effect.color_i + 1) % 8;
     legacy_ws_mode_apply();
+#endif
+
+#if 1
+    fc_effect.color_i++;
+    if (fc_effect.color_i >= 13 + 2) {
+        // 样机的 13 种模式 + 原本的 2 种声控模式
+        fc_effect.color_i = 0;
+    }
+
+    legacy_ws_mode_apply();
+#endif
 }
 
 //恢复灯光的默认状态
@@ -2627,7 +2702,10 @@ void set_fc_effect(void)
             printf("当前效果状态: 自定义效果");
             break;
         case IS_light_music:
-            printf("当前效果状态: 音乐律动");
+#if USER_DEBUG_LOG_ENABLE
+            printf("当前效果状态: 音乐律动\n");
+            printf("fc_effect.music.m == %u\n" , (uint16_t)fc_effect.music.m);            
+#endif
             break;
         case IS_smear_adjust:
             printf("当前效果状态: 涂抹功能");

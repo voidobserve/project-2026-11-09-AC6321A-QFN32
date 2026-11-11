@@ -29,7 +29,7 @@
     "C_Cpp.formatting": "clangFormat", // 使用 clang-format 进行格式化
     "Codegeex.RepoIndex": true,
     "taskManager.favorites": [
-        "project-2026-11-09-AC6329C-SOP16/Workspace/ac632n_spp_and_le",
-        "project-26-11-06-AC6969A-SOP16/Workspace/all"
+        "project-2026-11-09-AC6321A-QFN32/Workspace/ac632n_spp_and_le"
     ],
+    
 }

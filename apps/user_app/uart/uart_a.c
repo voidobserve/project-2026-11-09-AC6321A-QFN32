@@ -505,8 +505,8 @@ void uart_key_handle(uint8_t *buffer, uint32_t len)
         return;
     }
 
-#if USER_DEBUF_ENABLE
-    put_buf(buffer, len);
+#if USER_DEBUG_LOG_ENABLE
+    // put_buf(buffer, len);
 #endif
 
     /* len==4 / EA 00 05 xx 为旧产品裸协议；其它帧已在收包层完成CRC校验。 */
@@ -568,6 +568,9 @@ void uart_key_handle(uint8_t *buffer, uint32_t len)
                         color_ctrl_f == 1) {
                         color_ctrl_f = 0;
                         ws2812_power_unlock();
+#if USER_DEBUG_LOG_ENABLE
+                        // printf("%s %d\n", __FUNCTION__, __LINE__);
+#endif
                         legacy_ws_mode_next();
                     }
                     break;
@@ -617,6 +620,9 @@ void uart_key_handle(uint8_t *buffer, uint32_t len)
                     dingshi_cnt = 0;
                     if (color_ctrl_f == 2) {
                         ws2812_power_unlock();
+#if USER_DEBUG_LOG_ENABLE
+                        // printf("%s %d\n", __FUNCTION__, __LINE__);
+#endif
                         legacy_ws_mode_next();
                     } else if (rgbw_ctrl_f == 1) {
                         legacy_rgb_mode_next();
