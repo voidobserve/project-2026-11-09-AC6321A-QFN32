@@ -4766,8 +4766,9 @@ extern u16 get_music_adc(void);
 static uint32_t sound_last_log_ms;
 static uint16_t sound_adc_max;       /* 进入本模式后见到的最大 adc */
 
-/* 周期性打印能量采样（串口标定用） */
-static void sound_log_sample(uint32_t now, uint16_t adc, uint16_t raw)
+/* 周期性打印能量采样（串口标定用）；energy 由调用方传入，避免依赖声明顺序 */
+static void sound_log_sample(uint32_t now, uint16_t adc, uint16_t raw,
+                             uint16_t energy)
 {
     if (adc > sound_adc_max) {
         sound_adc_max = adc;
@@ -4777,8 +4778,7 @@ static void sound_log_sample(uint32_t now, uint16_t adc, uint16_t raw)
     }
     sound_last_log_ms = now;
     printf("[SND] m=%u adc=%u mx=%u e_raw=%u e=%u\n",
-           (uint16_t)fc_effect.color_i, adc, sound_adc_max, raw,
-           sound_energy_filtered);
+           (uint16_t)fc_effect.color_i, adc, sound_adc_max, raw, energy);
 }
 #endif
 
@@ -4886,7 +4886,7 @@ static uint8_t sound_guard(uint16_t *energy)
         sound_fallback_stage = 0U;
         *energy = sound_energy_filtered;
 #if SOUND_DEBUG_LOG
-        sound_log_sample(now, adc, raw);
+        sound_log_sample(now, adc, raw, sound_energy_filtered);
 #endif
         return 0U;
     }
