@@ -4760,26 +4760,9 @@ extern u16 get_music_adc(void);
 
 /* 串口调试打印：抓 log 标定能量用，量产置 0 */
 #define SOUND_DEBUG_LOG       1
-#if SOUND_DEBUG_LOG
+/* 串口调试打印：抓 log 标定能量用，量产置 0 */
+#define SOUND_DEBUG_LOG       1
 #define SOUND_LOG_MS          200U   /* 打印间隔(ms) */
-static uint32_t sound_last_log_ms;
-static uint16_t sound_adc_max;       /* 进入本模式后见到的最大 adc */
-
-/* 周期性打印能量采样（串口标定用）；energy 由调用方传入，避免依赖声明顺序 */
-static void sound_log_sample(uint32_t now, uint16_t adc, uint16_t raw,
-                             uint16_t energy)
-{
-    if (adc > sound_adc_max) {
-        sound_adc_max = adc;
-    }
-    if ((uint32_t)(now - sound_last_log_ms) < SOUND_LOG_MS) {
-        return;
-    }
-    sound_last_log_ms = now;
-    printf("[SND] m=%u adc=%u mx=%u e_raw=%u e=%u\n",
-           (uint16_t)fc_effect.color_i, adc, sound_adc_max, raw, energy);
-}
-#endif
 
 /* 13：紫色光柱的 15 级渐变（按 LED 位置取） */
 static const uint8_t sound_purple_bar[15][3] = {
@@ -4851,6 +4834,31 @@ static uint32_t sound_last_signal_ms;
 static uint32_t sound_sweep_start_ms;
 static uint8_t sound_fallback_stage;
 
+/* 本帧采样快照与当前模式的输出量（[SND] 日志用） */
+static uint16_t sound_frame_adc;
+static uint16_t sound_frame_raw;
+static uint16_t sound_state_value;
+
+#if SOUND_DEBUG_LOG
+static uint32_t sound_last_log_ms;
+static uint16_t sound_adc_min;
+static uint16_t sound_adc_max;
+
+/* 周期性打印：adc=当前值 mn/mx=进入本模式后最小/最大 er=查表值 e=平滑值
+ * st=本模式输出量(13柱长 14亮度 15档位 16等级 17窗口宽 18亮度) fb=兜底阶段 */
+static void sound_log_sample(uint32_t now)
+{
+    if ((uint32_t)(now - sound_last_log_ms) < SOUND_LOG_MS) {
+        return;
+    }
+    sound_last_log_ms = now;
+    printf("[SND] m=%u adc=%u mn=%u mx=%u er=%u e=%u st=%u fb=%u\n",
+           (uint16_t)fc_effect.color_i, sound_frame_adc, sound_adc_min,
+           sound_adc_max, sound_frame_raw, sound_energy_filtered,
+           sound_state_value, sound_fallback_stage);
+}
+#endif
+
 /* 写一颗灯（颜色按满亮度给，不做额外缩放） */
 static void sound_set_pixel(uint16_t offset, uint8_t red, uint8_t green,
                             uint8_t blue)
@@ -4889,7 +4897,9 @@ static void sound_begin(void)
     sound_fallback_stage = 0U;
     sound_last_signal_ms = millis();
     sound_sweep_start_ms = 0U;
+    sound_state_value = 0U;
 #if SOUND_DEBUG_LOG
+    sound_adc_min = 0xFFFFU;
     sound_adc_max = 0U;
     sound_last_log_ms = millis();
     printf("\n[SND] begin mode=%u lut=%u..%u silence=%u sweep=%u\n",
@@ -4922,8 +4932,16 @@ static uint8_t sound_guard(uint16_t *energy)
         sound_last_signal_ms = now;
         sound_fallback_stage = 0U;
         *energy = sound_energy_filtered;
+        sound_frame_adc = adc;
+        sound_frame_raw = raw;
 #if SOUND_DEBUG_LOG
-        sound_log_sample(now, adc, raw, sound_energy_filtered);
+        if (adc < sound_adc_min) {
+            sound_adc_min = adc;
+        }
+        if (adc > sound_adc_max) {
+            sound_adc_max = adc;
+        }
+        sound_log_sample(now);
 #endif
         return 0U;
     }
@@ -4983,6 +5001,7 @@ uint16_t WS2812FX_mode_sound_purple_bar(void)
     }
 
     bar = (uint16_t)((uint32_t)energy * length / SOUND_ENERGY_MAX);
+    sound_state_value = bar;
     dot = (uint16_t)((length - 1U) - (_seg_rt->counter_mode_step % (length - 1U)));
     _seg_rt->counter_mode_step += 1U;
 
@@ -5021,6 +5040,7 @@ uint16_t WS2812FX_mode_sound_color_flow(void)
     step = (uint16_t)(_seg_rt->counter_mode_step++ & 0x3FFFU);
     trail = (energy > 50U) ? 2U : 1U;
     blend = (uint8_t)((uint32_t)energy * 255U / SOUND_ENERGY_MAX);
+    sound_state_value = blend;
 
     for (i = 0; i < _seg_len; i++) {
         cell = (uint16_t)((i + 4U * 15U - step) % 4U);
@@ -5057,6 +5077,7 @@ uint16_t WS2812FX_mode_sound_cyan_dot(void)
                                   sizeof(sound_dot_steps[0])));
     _seg_rt->counter_mode_step += 1U;
     level = (uint8_t)((uint32_t)energy * 6U / SOUND_ENERGY_MAX);
+    sound_state_value = level;
 
     for (i = 0; i < length; i++) {
         sound_set_pixel(i, 0, 0, 0);
@@ -5090,6 +5111,7 @@ uint16_t WS2812FX_mode_sound_sym_ladder(void)
     }
 
     level = (uint16_t)((uint32_t)energy * 15U / SOUND_ENERGY_MAX);
+    sound_state_value = level;
 
     for (i = 0; i < _seg_len; i++) {
         distance = sound_center_distance(i, _seg_len);
@@ -5146,6 +5168,7 @@ uint16_t WS2812FX_mode_sound_center_window(void)
     }
 
     width = (uint16_t)(1U + 2U * ((uint32_t)energy * 7U / SOUND_ENERGY_MAX));
+    sound_state_value = width;
     if (width > length) {
         width = length;
     }
@@ -5191,6 +5214,7 @@ uint16_t WS2812FX_mode_sound_dual_block(void)
     period = (uint16_t)(2000U - (uint32_t)energy * 1460U / SOUND_ENERGY_MAX);
     brightness = (uint16_t)((SOUND_ENERGY_MAX - energy) * SOUND_LEVEL_MAX /
                             SOUND_ENERGY_MAX);
+    sound_state_value = brightness;
 
     phase = (uint32_t)(millis() % period);            /* 亮 2/3、暗 1/3 的脉动 */
     if (phase > (uint32_t)(period * 2U / 3U)) {
