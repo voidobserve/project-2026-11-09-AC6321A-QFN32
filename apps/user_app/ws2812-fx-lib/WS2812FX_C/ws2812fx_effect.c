@@ -4732,3 +4732,449 @@ uint16_t WS2812FX_mode_rainbow_band_flow(void)
     }
     return ANIM_FRAME_MS;
 }
+
+
+
+/* ============================ 样机 6 个声控动画 ============================
+ * 规格：样机信号采集/01-分析结果/声控模式总规格.md。
+ * 输入：串口能量帧 EA 00 04 <H> <L> → music_adc(0~65535)，见 get_music_adc()。
+ * 约定：
+ *   1) 能量归一化成 0~100（e），再做一阶平滑；e 只决定"状态/亮度/宽度"，
+ *      时间只决定"位置/相位"，两者互不耦合；
+ *   2) 无声判据沿用 sound_handle() 的 adc <= SOUND_ADC_SILENCE；
+ *   3) 无声持续 SOUND_SILENCE_MS 后进入兜底：清空残留 → 用 0→100→0 的能量
+ *      把本模式完整跑一轮 → 全灭等待；中途恢复能量则立即退出兜底；
+ *   4) 声控期间信号突然消失，同样走这套兜底。
+ * ========================================================================== */
+
+extern u16 get_music_adc(void);
+
+#define SOUND_FRAME_MS        50U    /* 常规刷新间隔(ms) */
+#define SOUND_FAST_FRAME_MS   25U    /* 快速类刷新间隔(ms) */
+#define SOUND_SLOW_FRAME_MS   70U    /* 阶梯类刷新间隔(ms) */
+#define SOUND_ENERGY_MAX      100U   /* 能量归一化上限 */
+#define SOUND_ADC_SILENCE     10U    /* 静音门槛，与 sound_handle() 一致 */
+#define SOUND_ADC_FULL        16000U /* 满量程：与 music_voice[21] 的上限(16049)对齐 */
+#define SOUND_SILENCE_MS      300U   /* 判定无声的持续时间(ms) */
+#define SOUND_SWEEP_MS        1600U  /* 兜底补跑一轮的时长(ms) */
+#define SOUND_LEVEL_MAX       204U   /* 与定时动画一致的满亮度 */
+
+/* 串口调试打印：抓 log 标定能量用，量产置 0 */
+#define SOUND_DEBUG_LOG       1
+#if SOUND_DEBUG_LOG
+#define SOUND_LOG_MS          200U   /* 打印间隔(ms) */
+static uint32_t sound_last_log_ms;
+static uint16_t sound_adc_max;       /* 进入本模式后见到的最大 adc */
+
+/* 周期性打印能量采样（串口标定用） */
+static void sound_log_sample(uint32_t now, uint16_t adc, uint16_t raw)
+{
+    if (adc > sound_adc_max) {
+        sound_adc_max = adc;
+    }
+    if ((uint32_t)(now - sound_last_log_ms) < SOUND_LOG_MS) {
+        return;
+    }
+    sound_last_log_ms = now;
+    printf("[SND] m=%u adc=%u mx=%u e_raw=%u e=%u\n",
+           (uint16_t)fc_effect.color_i, adc, sound_adc_max, raw,
+           sound_energy_filtered);
+}
+#endif
+
+/* 13：紫色光柱的 15 级渐变（按 LED 位置取） */
+static const uint8_t sound_purple_bar[15][3] = {
+    {204,  24, 203}, {204,  31, 203}, {204,  37, 203}, {204,  44, 203},
+    {203,  52, 203}, {203,  59, 203}, {203,  67, 202}, {203,  75, 202},
+    {203,  83, 202}, {203,  91, 202}, {203,  99, 202}, {203, 120, 201},
+    {203, 146, 200}, {202, 170, 200}, {202, 189, 200}
+};
+
+/* 15：青色光点的 7 档亮度 */
+static const uint8_t sound_cyan_dot[7][3] = {
+    {0,  53,  95}, {0,  61, 108}, {0,  69, 122}, {0,  76, 136},
+    {0,  84, 149}, {0,  92, 163}, {0, 100, 176}
+};
+
+/* 16：冷色环（中心→外）与暖色环（外→内） */
+static const uint8_t sound_ladder_cold[8][3] = {
+    {  0, 201, 133}, {  0, 198, 159}, {  0, 192, 184}, {  0, 179, 203},
+    {  0, 128, 204}, {  0,  70, 204}, { 25,  34, 204}, { 86,  13, 204}
+};
+static const uint8_t sound_ladder_warm[7][3] = {
+    {204,  76,  20}, {204, 165,  79}, {199, 204, 112}, {154, 204, 132},
+    {108, 204, 134}, { 50, 204, 118}, {  1, 203, 115}
+};
+
+/* 15：光点位置表（15 颗样机的实测序列，最后一步熄灭） */
+static const int8_t sound_dot_steps[12][2] = {
+    {3, -1}, {2, 4}, {1, 5}, {0, 6}, {7, -1}, {8, -1},
+    {9, -1}, {10, -1}, {11, -1}, {12, -1}, {13, -1}, {-1, -1}
+};
+
+/* 声控公共状态 */
+static uint16_t sound_energy_filtered;
+static uint32_t sound_last_signal_ms;
+static uint32_t sound_sweep_start_ms;
+static uint8_t sound_fallback_stage;
+
+/* 写一颗灯（颜色按满亮度给，不做额外缩放） */
+static void sound_set_pixel(uint16_t offset, uint8_t red, uint8_t green,
+                            uint8_t blue)
+{
+    WS2812FX_setPixelColor((uint16_t)(_seg->start + offset),
+                           ((uint32_t)red << 16) | ((uint32_t)green << 8) | blue);
+}
+
+/* 整条填充 */
+static void sound_fill(uint32_t color)
+{
+    Adafruit_NeoPixel_fill(color, _seg->start, _seg_len);
+}
+
+/* 到灯带中心的距离（用于 16 号的对称分级） */
+static uint16_t sound_center_distance(uint16_t index, uint16_t length)
+{
+    uint16_t twice = (uint16_t)((index * 2U > (length - 1U)) ?
+                                (index * 2U - (length - 1U)) :
+                                ((length - 1U) - index * 2U));
+
+    twice = (uint16_t)((twice + 1U) / 2U);
+    if (twice > 7U) {
+        twice = 7U;
+    }
+    return twice;
+}
+
+/* 进入本模式：重置能量滤波与兜底状态 */
+static void sound_begin(void)
+{
+    if (_seg_rt->counter_mode_call != 0U) {
+        return;
+    }
+    sound_energy_filtered = 0U;
+    sound_fallback_stage = 0U;
+    sound_last_signal_ms = millis();
+    sound_sweep_start_ms = 0U;
+#if SOUND_DEBUG_LOG
+    sound_adc_max = 0U;
+    sound_last_log_ms = millis();
+    printf("\n[SND] begin mode=%u silence=%u full=%u sweep=%u\n",
+           (uint16_t)fc_effect.color_i, SOUND_ADC_SILENCE, SOUND_ADC_FULL,
+           SOUND_SWEEP_MS);
+#endif
+}
+
+/* 能量采样 + 静音兜底。
+ * 返回 0：本帧正常渲染，*energy 为 0~100；
+ * 返回 1：本帧已由兜底处理（清空 / 结束），调用者直接返回刷新间隔。 */
+static uint8_t sound_guard(uint16_t *energy)
+{
+    uint32_t now = millis();
+    uint16_t adc = get_music_adc();
+    uint32_t elapsed;
+
+    if (adc > SOUND_ADC_SILENCE) {
+        uint16_t raw = (uint16_t)((uint32_t)(adc - SOUND_ADC_SILENCE) *
+                                  SOUND_ENERGY_MAX /
+                                  (SOUND_ADC_FULL - SOUND_ADC_SILENCE));
+        if (raw > SOUND_ENERGY_MAX) {
+            raw = SOUND_ENERGY_MAX;
+        }
+        sound_energy_filtered = (uint16_t)((sound_energy_filtered * 3U + raw) / 4U);
+        sound_last_signal_ms = now;
+        sound_fallback_stage = 0U;
+        *energy = sound_energy_filtered;
+#if SOUND_DEBUG_LOG
+        sound_log_sample(now, adc, raw);
+#endif
+        return 0U;
+    }
+
+    if ((uint32_t)(now - sound_last_signal_ms) < SOUND_SILENCE_MS) {
+        *energy = sound_energy_filtered;      /* 短暂停顿：画面保持 */
+        return 0U;
+    }
+
+    if (sound_fallback_stage == 0U) {         /* 第一步：清空残留 */
+        sound_fallback_stage = 1U;
+        sound_sweep_start_ms = now;
+        sound_fill(0);
+#if SOUND_DEBUG_LOG
+        printf("[SND] silence %u ms -> clear\n",
+               (unsigned)(now - sound_last_signal_ms));
+#endif
+        return 1U;
+    }
+
+    elapsed = (uint32_t)(now - sound_sweep_start_ms);
+    if (elapsed >= SOUND_SWEEP_MS) {          /* 最后一步：全灭并停住 */
+        if (sound_fallback_stage < 3U) {
+            sound_fallback_stage = 3U;
+            sound_fill(0);
+#if SOUND_DEBUG_LOG
+            printf("[SND] sweep done -> off\n");
+#endif
+        }
+        return 1U;
+    }
+
+    sound_fallback_stage = 2U;
+    if (elapsed < (SOUND_SWEEP_MS / 2U)) {    /* 补跑一轮：0 -> 100 -> 0 */
+        *energy = (uint16_t)(elapsed * SOUND_ENERGY_MAX / (SOUND_SWEEP_MS / 2U));
+    } else {
+        *energy = (uint16_t)(SOUND_ENERGY_MAX -
+                             (elapsed - SOUND_SWEEP_MS / 2U) * SOUND_ENERGY_MAX /
+                             (SOUND_SWEEP_MS / 2U));
+    }
+    return 0U;
+}
+
+/* 13 紫色光柱 + 送料光点：柱长由能量决定，光点从远端向柱头走 */
+uint16_t WS2812FX_mode_sound_purple_bar(void)
+{
+    uint16_t energy;
+    uint16_t length = _seg_len;
+    uint16_t bar;
+    uint16_t dot;
+    uint16_t i;
+    uint16_t index;
+
+    sound_begin();
+    if (sound_guard(&energy)) {
+        return SOUND_FRAME_MS;
+    }
+
+    bar = (uint16_t)((uint32_t)energy * length / SOUND_ENERGY_MAX);
+    dot = (uint16_t)((length - 1U) - (_seg_rt->counter_mode_step % (length - 1U)));
+    _seg_rt->counter_mode_step += 1U;
+
+    for (i = 0; i < length; i++) {
+        if (i < bar) {
+            index = (uint16_t)((uint32_t)i * 14U / (length - 1U));
+            sound_set_pixel(i, sound_purple_bar[index][0],
+                            sound_purple_bar[index][1],
+                            sound_purple_bar[index][2]);
+        } else if (i == dot) {
+            sound_set_pixel(i, sound_purple_bar[14][0], sound_purple_bar[14][1],
+                            sound_purple_bar[14][2]);
+        } else {
+            sound_set_pixel(i, 0, 0, 0);
+        }
+    }
+    return SOUND_FRAME_MS;
+}
+
+/* 14 彩色流水：4 格间距光点向右流动，亮度/拖尾由能量决定 */
+uint16_t WS2812FX_mode_sound_color_flow(void)
+{
+    uint16_t energy;
+    uint16_t i;
+    uint16_t step;
+    uint16_t cell;
+    uint8_t trail;
+    uint8_t blend;
+    uint32_t color;
+
+    sound_begin();
+    if (sound_guard(&energy)) {
+        return SOUND_FRAME_MS;
+    }
+
+    step = (uint16_t)(_seg_rt->counter_mode_step++ & 0x3FFFU);
+    trail = (energy > 50U) ? 2U : 1U;
+    blend = (uint8_t)((uint32_t)energy * 255U / SOUND_ENERGY_MAX);
+
+    for (i = 0; i < _seg_len; i++) {
+        cell = (uint16_t)((i + 4U * 15U - step) % 4U);
+        if (cell <= trail) {
+            color = WS2812FX_color_wheel((uint8_t)(step * 3U + i * 16U));
+            color = WS2812FX_color_blend(BLACK, color, blend);
+            sound_set_pixel(i, (uint8_t)(color >> 16), (uint8_t)(color >> 8),
+                            (uint8_t)color);
+        } else {
+            sound_set_pixel(i, 0, 0, 0);
+        }
+    }
+    return SOUND_FRAME_MS;
+}
+
+/* 15 青色光点：位置走固定循环，亮度档由能量决定 */
+uint16_t WS2812FX_mode_sound_cyan_dot(void)
+{
+    uint16_t energy;
+    uint16_t length = _seg_len;
+    uint16_t stage;
+    uint16_t i;
+    uint16_t pixel;
+    uint8_t level;
+    uint16_t j;
+
+    sound_begin();
+    if (sound_guard(&energy)) {
+        return SOUND_FRAME_MS;
+    }
+
+    stage = (uint16_t)(_seg_rt->counter_mode_step %
+                       (uint16_t)(sizeof(sound_dot_steps) /
+                                  sizeof(sound_dot_steps[0])));
+    _seg_rt->counter_mode_step += 1U;
+    level = (uint8_t)((uint32_t)energy * 6U / SOUND_ENERGY_MAX);
+
+    for (i = 0; i < length; i++) {
+        sound_set_pixel(i, 0, 0, 0);
+    }
+    for (j = 0; j < 2U; j++) {
+        if (sound_dot_steps[stage][j] < 0) {
+            continue;
+        }
+        pixel = (uint16_t)((uint32_t)sound_dot_steps[stage][j] * (length - 1U) / 14U);
+        if (pixel < length) {
+            sound_set_pixel(pixel, sound_cyan_dot[level][0],
+                            sound_cyan_dot[level][1], sound_cyan_dot[level][2]);
+        }
+    }
+    return SOUND_FAST_FRAME_MS;
+}
+
+/* 16 对称阶梯：16 个等级，前 8 级暖环向内推，后 7 级从中心挖空 */
+uint16_t WS2812FX_mode_sound_sym_ladder(void)
+{
+    uint16_t energy;
+    uint16_t level;
+    uint16_t distance;
+    uint16_t warm_from;
+    uint16_t hole;
+    uint16_t i;
+
+    sound_begin();
+    if (sound_guard(&energy)) {
+        return SOUND_FRAME_MS;
+    }
+
+    level = (uint16_t)((uint32_t)energy * 15U / SOUND_ENERGY_MAX);
+
+    for (i = 0; i < _seg_len; i++) {
+        distance = sound_center_distance(i, _seg_len);
+        if (level == 0U) {
+            sound_set_pixel(i, 0, 0, 0);
+            continue;
+        }
+        if (level <= 8U) {
+            warm_from = (uint16_t)(9U - level);
+            if ((distance >= warm_from) && (distance >= 1U)) {
+                sound_set_pixel(i, sound_ladder_warm[distance - 1U][0],
+                                sound_ladder_warm[distance - 1U][1],
+                                sound_ladder_warm[distance - 1U][2]);
+            } else {
+                sound_set_pixel(i, sound_ladder_cold[distance][0],
+                                sound_ladder_cold[distance][1],
+                                sound_ladder_cold[distance][2]);
+            }
+            continue;
+        }
+        hole = (uint16_t)(level - 9U);
+        if (distance <= hole) {
+            sound_set_pixel(i, 0, 0, 0);
+        } else if (distance >= 1U) {
+            sound_set_pixel(i, sound_ladder_warm[distance - 1U][0],
+                            sound_ladder_warm[distance - 1U][1],
+                            sound_ladder_warm[distance - 1U][2]);
+        } else {
+            sound_set_pixel(i, sound_ladder_cold[0][0], sound_ladder_cold[0][1],
+                            sound_ladder_cold[0][2]);
+        }
+    }
+    return SOUND_SLOW_FRAME_MS;
+}
+
+/* 17 居中窗口：窗口宽度由能量决定，窗内绿->白渐变、配色随时间滑动 */
+uint16_t WS2812FX_mode_sound_center_window(void)
+{
+    uint16_t energy;
+    uint16_t length = _seg_len;
+    uint16_t width;
+    uint16_t start;
+    uint16_t half;
+    uint16_t center;
+    uint16_t distance;
+    uint16_t i;
+    uint16_t blend;
+    uint32_t inner;
+    uint32_t color;
+
+    sound_begin();
+    if (sound_guard(&energy)) {
+        return SOUND_FRAME_MS;
+    }
+
+    width = (uint16_t)(1U + 2U * ((uint32_t)energy * 7U / SOUND_ENERGY_MAX));
+    if (width > length) {
+        width = length;
+    }
+    start = (uint16_t)((length - width) / 2U);
+    half = (uint16_t)(width / 2U);
+    center = (uint16_t)(start + half);
+    inner = WS2812FX_color_wheel((uint8_t)(_seg_rt->counter_mode_step * 2U));
+    _seg_rt->counter_mode_step += 1U;
+
+    for (i = 0; i < length; i++) {
+        if ((i < start) || (i >= (uint16_t)(start + width))) {
+            sound_set_pixel(i, 0, 0, 0);
+            continue;
+        }
+        distance = (i > center) ? (uint16_t)(i - center) : (uint16_t)(center - i);
+        blend = (half == 0U) ? 0U : (uint16_t)(distance * 255U / half);
+        color = WS2812FX_color_blend(inner, 0xC8C6CC, (uint8_t)blend);
+        sound_set_pixel(i, (uint8_t)(color >> 16), (uint8_t)(color >> 8),
+                        (uint8_t)color);
+    }
+    return SOUND_FAST_FRAME_MS;
+}
+
+/* 18 双色块脉动：前 7 / 后 8 两段各一色，能量小->亮且慢，能量大->暗且快 */
+uint16_t WS2812FX_mode_sound_dual_block(void)
+{
+    uint16_t energy;
+    uint16_t length = _seg_len;
+    uint16_t split;
+    uint16_t period;
+    uint16_t brightness;
+    uint32_t phase;
+    uint32_t first;
+    uint32_t second;
+    uint16_t i;
+
+    sound_begin();
+    if (sound_guard(&energy)) {
+        return SOUND_FRAME_MS;
+    }
+
+    split = (uint16_t)((uint32_t)length * 7U / 15U);
+    period = (uint16_t)(2000U - (uint32_t)energy * 1460U / SOUND_ENERGY_MAX);
+    brightness = (uint16_t)((SOUND_ENERGY_MAX - energy) * SOUND_LEVEL_MAX /
+                            SOUND_ENERGY_MAX);
+
+    phase = (uint32_t)(millis() % period);            /* 亮 2/3、暗 1/3 的脉动 */
+    if (phase > (uint32_t)(period * 2U / 3U)) {
+        brightness = (uint16_t)(brightness / 8U);
+    }
+
+    first = WS2812FX_color_wheel((uint8_t)(millis() / 40U));
+    second = WS2812FX_color_wheel((uint8_t)(millis() / 40U + 96U));
+    first = WS2812FX_color_blend(BLACK, first,
+                                 (uint8_t)(brightness * 255U / SOUND_LEVEL_MAX));
+    second = WS2812FX_color_blend(BLACK, second,
+                                  (uint8_t)(brightness * 255U / SOUND_LEVEL_MAX));
+
+    for (i = 0; i < length; i++) {
+        if (i < split) {
+            sound_set_pixel(i, (uint8_t)(first >> 16), (uint8_t)(first >> 8),
+                            (uint8_t)first);
+        } else {
+            sound_set_pixel(i, (uint8_t)(second >> 16), (uint8_t)(second >> 8),
+                            (uint8_t)second);
+        }
+    }
+    return SOUND_FRAME_MS;
+}

@@ -76,7 +76,8 @@ const u32 fc_static_map[MAX_STATIC_N] =
 
 
 
-
+/* 物理灯数上限：段0(七彩) + 段1(幻彩1) + 段2(幻彩2)，由板级配置决定，编译期常量 */
+#define FC_LED_NUM_MAX      (USER_WS2812_SEGMENT_0_LEN + USER_WS2812_SEGMENT_1_LEN + USER_WS2812_SEGMENT_2_LEN)
 
 // 效果数据初始化
 void fc_data_init(void)
@@ -91,8 +92,8 @@ void fc_data_init(void)
     fc_effect.last_led_on_off_flag = DEVICE_ON;
     fc_effect.last_led1_on_off_flag = DEVICE_ON;
 
-    fc_effect.led_num_max = (1 + USER_WS2812_SEGMENT_1_LEN + USER_WS2812_SEGMENT_2_LEN);  //第一路幻彩 rgb+19+60个幻彩灯
-    fc_effect.led_num = (1 + USER_WS2812_SEGMENT_1_LEN + USER_WS2812_SEGMENT_2_LEN);  //第一路幻彩 rgb+19+60个幻彩灯
+    fc_effect.led_num_max = FC_LED_NUM_MAX;  //第一路幻彩 rgb+xx个幻彩灯
+    fc_effect.led_num = FC_LED_NUM_MAX;  //第一路幻彩 rgb+xx个幻彩灯
 
     fc_effect.Now_state = IS_light_music;
     fc_effect.custom_index = 10;
@@ -116,6 +117,20 @@ void fc_data_init(void)
     /* VM布局占位字段：功能失能时也初始化，避免保存未定义数据。 */
     fc_effect.ex_white_light_power = 0;
     fc_effect.ex_white_light_level = WHITE_LIGHT_MAX_LEVEL;
+}
+
+/*
+ * 上电固定灯点数：灯带长度由板级配置的物理灯数决定，不跟随VM里保存的值。
+ *
+ * 无线升级会保留VM区（lib_update_config.c: support_vm_data_keep = 1），
+ * VM里的led_num/led_num_max是旧固件写的，
+ * 升级到新的固件后仍按VM区的数据进行初始化，WS2812FX/NeoPixel的numLEDs就比实际灯数小，
+ * 末尾灯珠的写操作被库直接丢弃（现象：最长那路最后2颗不亮，USB整片下载后正常）。
+ */
+void fc_led_num_fix(void)
+{
+    fc_effect.led_num_max = FC_LED_NUM_MAX;
+    fc_effect.led_num = FC_LED_NUM_MAX;
 }
 
 #ifdef PC_SERIAL_DEBUG
@@ -1853,6 +1868,47 @@ static void prototype_animation_apply(mode_ptr animation)
     }
 }
 
+/*************************************************** 样机 6 个声控动画 *****************************************************/
+/* 实现在 ws2812fx_effect.c 末尾；顺序与旧协议 color_i 13~18 一一对应 */
+static const mode_ptr sound_animations[] = {
+    &WS2812FX_mode_sound_purple_bar,     /* 13 紫色光柱 + 送料光点 */
+    &WS2812FX_mode_sound_color_flow,     /* 14 彩色流水 */
+    &WS2812FX_mode_sound_cyan_dot,       /* 15 青色光点 */
+    &WS2812FX_mode_sound_sym_ladder,     /* 16 对称阶梯 */
+    &WS2812FX_mode_sound_center_window,  /* 17 居中窗口 */
+    &WS2812FX_mode_sound_dual_block      /* 18 双色块脉动 */
+};
+
+#define SOUND_MODE_COUNT \
+    ((uint8_t)(sizeof(sound_animations) / sizeof(sound_animations[0])))
+#define SOUND_MODE_FIRST   PROTOTYPE_ANIMATION_COUNT
+#define SOUND_MODE_LAST    ((uint8_t)(SOUND_MODE_FIRST + SOUND_MODE_COUNT - 1U))
+
+/* 旧声控（music_* 12 种）保留代码但不再进循环 */
+#define OLD_MUSIC_MODE_ENABLE   0
+
+/* 把声控动画挂到段 1（不清缓冲，切入即出图） */
+static void sound_animation_apply(mode_ptr animation)
+{
+    uint8_t restart = (uint8_t)(
+        (WS2812FX_getSegment_seg(USER_SEGMENT1_INDEX)->mode != animation) ||
+        !WS2812FX_isRunning());
+
+    WS2812FX_setSegment_colorOptions(
+        USER_SEGMENT1_INDEX,
+        user_led_segments[USER_SEGMENT1_INDEX].start,
+        user_led_segments[USER_SEGMENT1_INDEX].end,
+        animation,
+        0,
+        fc_effect.dream_scene.speed,
+        0);
+
+    if (restart) {
+        WS2812FX_start();
+        WS2812FX_trigger();
+    }
+}
+
 //------------------------------------------------------遥控
 
 extern uint8_t flash_flag;
@@ -2122,7 +2178,7 @@ void aws_pixels_dynamic_mode_change(u8 dir)
 
     if (CHANGE_DIR_FORWARD == dir) {
         // 下一个模式
-        if (fc_effect.color_i < (PROTOTYPE_ANIMATION_COUNT + 1U)) {
+        if (fc_effect.color_i < (SOUND_MODE_LAST + 1U)) {
             fc_effect.color_i++;
         }
     } else if (CHANGE_DIR_BACKWARD == dir) {
@@ -2140,10 +2196,8 @@ void aws_pixels_dynamic_mode_change(u8 dir)
         fc_effect.dream_scene.change_type =
             (change_type_e)(MODE_ORANGE_INWARD_FILL + fc_effect.color_i);
     } else {
-        /* 13 对应“频谱3”、14 对应“节奏1”，与 music_effect() 的 case 一致 */
+        /* 13~18 为样机 6 个声控模式，分派见 music_effect() */
         fc_effect.Now_state = IS_light_music;
-        fc_effect.music.m =
-            (fc_effect.color_i == PROTOTYPE_ANIMATION_COUNT) ? 8 : 3;
     }
 
     // fc_effect.Now_state 等于 IS_light_music 时，会发送music_on出去，所以在这里不需要发送music_on出去
@@ -2175,8 +2229,8 @@ static void legacy_ws_mode_apply(void)
 #endif
 
     // 检查幻彩灯的动画索引值是否在范围内，若不在，恢复到默认值0
-    if (fc_effect.color_i >= 13 + 2) {
-        // 样机的 13 种模式 + 原本的 2 种声控模式
+    if (fc_effect.color_i > SOUND_MODE_LAST) {
+        // 0~12 样机动画 + 13~18 声控模式，越界回到 0
         fc_effect.color_i = 0;
     }
 
@@ -2203,8 +2257,8 @@ void legacy_ws_mode_next(void)
 
 #if 1
     fc_effect.color_i++;
-    if (fc_effect.color_i >= 13 + 2) {
-        // 样机的 13 种模式 + 原本的 2 种声控模式
+    if (fc_effect.color_i > SOUND_MODE_LAST) {
+        // 0~12 样机动画 + 13~18 声控模式，循环回 0
         fc_effect.color_i = 0;
     }
 
@@ -2641,6 +2695,15 @@ static void ls_scene_effect(void)
 /*************************************************** 声控效果调度 *****************************************************/
 void music_effect(void)
 {
+    /* 样机 6 个声控模式：color_i 13~18，由串口能量驱动（EA 00 04） */
+    if ((fc_effect.color_i >= SOUND_MODE_FIRST) &&
+        (fc_effect.color_i <= SOUND_MODE_LAST)) {
+        sound_animation_apply(
+            sound_animations[fc_effect.color_i - SOUND_MODE_FIRST]);
+        return;
+    }
+
+#if OLD_MUSIC_MODE_ENABLE
     extern uint16_t music_meteor(void);
 
     //频谱
@@ -2737,6 +2800,7 @@ void music_effect(void)
         SIZE_MEDIUM | FADE_XSLOW);               //选项，这里像素点大小：3,反向/反向
     WS2812FX_start();
     WS2812FX_trigger();
+#endif
 }
 
 /************************************************** 总效果调度函数 *****************************************************/

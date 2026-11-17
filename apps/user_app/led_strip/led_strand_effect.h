@@ -180,6 +180,7 @@ void effect_smear_adjust_updata(smear_tool_e tool, hsv_t *colour,unsigned short 
 void set_fc_effect(void);
 
 void full_color_init(void);
+void fc_led_num_fix(void);
 void soft_turn_off_lights(void); //软关灯处理
 void soft_turn_on_the_light(void) ;  //软开灯处理
 void ls_set_speed(uint8_t s);

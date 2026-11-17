@@ -110,6 +110,16 @@ uint16_t
   WS2812FX_mode_seven_color_jump(void),
   WS2812FX_mode_rainbow_band_flow(void);
 
+/* 样机 6 个声控动画（规格：样机信号采集/01-分析结果/声控模式总规格.md），
+ * 顺序与旧协议动态模式 color_i 13~18 一一对应 */
+uint16_t
+  WS2812FX_mode_sound_purple_bar(void),
+  WS2812FX_mode_sound_color_flow(void),
+  WS2812FX_mode_sound_cyan_dot(void),
+  WS2812FX_mode_sound_sym_ladder(void),
+  WS2812FX_mode_sound_center_window(void),
+  WS2812FX_mode_sound_dual_block(void);
+
 extern void set_music_oc_trg(u8 p);   //修改灯带上升的长度
 
 

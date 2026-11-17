@@ -59,6 +59,10 @@ void read_flash_device_status_init(void)
     RF433_CODE2 = 0xFFFF;
 #endif
 #endif
+
+    /* 升级会保留VM区，恢复出来的灯点数是旧固件写的（例如短边28颗时存的是113），
+       这里按当前固件的物理灯数重新固定，否则WS2812FX的numLEDs会比实际灯数小、末尾灯珠不亮 */
+    fc_led_num_fix();
 }
 
 
