@@ -4750,6 +4750,7 @@ uint16_t WS2812FX_mode_rainbow_band_flow(void)
 extern u16 get_music_adc(void);
 
 #define SOUND_FRAME_MS        50U    /* 常规刷新间隔(ms) */
+#define SOUND_BAR_FRAME_MS    20U    /* 13：均衡器刷新间隔(ms)，要跟得上鼓点 */
 #define SOUND_FAST_FRAME_MS   25U    /* 快速类刷新间隔(ms) */
 #define SOUND_SLOW_FRAME_MS   70U    /* 阶梯类刷新间隔(ms) */
 #define SOUND_ENERGY_MAX      100U   /* 能量归一化上限 */
@@ -4758,7 +4759,7 @@ extern u16 get_music_adc(void);
 #define SOUND_SWEEP_MS        1600U  /* 兜底补跑一轮的时长(ms) */
 #define SOUND_LEVEL_MAX       204U   /* 与定时动画一致的满亮度 */
 #define SOUND_BAR_DECAY_MS    80U    /* 13：柱高无声时每滑落一格的时间(ms) */
-#define SOUND_PEAK_DECAY_MS   400U   /* 13：白色块(峰值保持)每滑落一格的时间(ms) */
+#define SOUND_BAR_CAP         2U     /* 13：柱顶白色块的格数 */
 
 /* 串口调试打印：抓 log 标定能量用，量产置 0 */
 #define SOUND_DEBUG_LOG       1
@@ -4841,11 +4842,9 @@ static uint16_t sound_frame_adc;
 static uint16_t sound_frame_raw;
 static uint16_t sound_state_value;
 
-/* 13 的均衡器柱高、峰值保持与滑落计时 */
+/* 13 的均衡器柱高与滑落计时 */
 static uint16_t sound_bar_level;
-static uint16_t sound_bar_peak;
 static uint32_t sound_bar_decay_ms;
-static uint32_t sound_peak_decay_ms;
 
 #if SOUND_DEBUG_LOG
 static uint32_t sound_last_log_ms;
@@ -4907,9 +4906,7 @@ static void sound_begin(void)
     sound_sweep_start_ms = 0U;
     sound_state_value = 0U;
     sound_bar_level = (uint16_t)(_seg_len / 2U);   /* 13 进入时默认半条，无声再滑落 */
-    sound_bar_peak = sound_bar_level;
     sound_bar_decay_ms = millis();
-    sound_peak_decay_ms = millis();
 #if SOUND_DEBUG_LOG
     sound_adc_min = 0xFFFFU;
     sound_adc_max = 0U;
@@ -4933,10 +4930,9 @@ static uint8_t sound_guard(uint16_t *energy)
     if (adc > SOUND_ADC_SILENCE) {
         uint16_t raw = sound_energy_from_adc(adc);
 
-        /* 快起慢落：起音 3/4 跟新值，回落 3/4 保留旧值 */
+        /* 起音不做平滑（直接跟，鼓点才不迟钝），回落才慢 */
         if (raw > sound_energy_filtered) {
-            sound_energy_filtered = (uint16_t)((sound_energy_filtered +
-                                                raw * 3U) / 4U);
+            sound_energy_filtered = raw;
         } else {
             sound_energy_filtered = (uint16_t)((sound_energy_filtered * 3U +
                                                 raw) / 4U);
@@ -4997,28 +4993,26 @@ static uint8_t sound_guard(uint16_t *energy)
     return 0U;
 }
 
-/* 13 紫色均衡器：底部紫色柱（颜色按位置取，越往上越白）+ 柱顶上方一个白色块；
- * 柱高随能量即时上升、无声时按 SOUND_BAR_DECAY_MS 滑落；白块是"峰值保持"，
- * 比柱顶掉得慢，所以悬在上方；进入时柱与白块都在半条处。 */
+/* 13 紫色均衡器：底部紫色柱（按位置取紫→粉渐变），柱顶永远压 SOUND_BAR_CAP 格白色块；
+ * 起音立即跟上，无声时每 SOUND_BAR_DECAY_MS 滑落一格；进入时默认半条。 */
 uint16_t WS2812FX_mode_sound_purple_bar(void)
 {
     uint16_t energy;
     uint16_t length = _seg_len;
-    uint16_t top = (uint16_t)(length - 1U);
     uint16_t target;
-    uint16_t dot;
+    uint16_t purple;
     uint16_t i;
     uint16_t index;
     uint32_t now = millis();
 
     sound_begin();
     if (sound_guard(&energy)) {
-        return SOUND_FRAME_MS;
+        return SOUND_BAR_FRAME_MS;
     }
 
     target = (uint16_t)((uint32_t)energy * length / SOUND_ENERGY_MAX);
-    if (target > top) {
-        target = top;
+    if (target > length) {
+        target = length;
     }
     if (target >= sound_bar_level) {              /* 起音：立刻跟上 */
         sound_bar_level = target;
@@ -5030,33 +5024,25 @@ uint16_t WS2812FX_mode_sound_purple_bar(void)
         }
     }
 
-    if (sound_bar_level >= sound_bar_peak) {      /* 峰值保持：跟涨、慢落 */
-        sound_bar_peak = sound_bar_level;
-        sound_peak_decay_ms = now;
-    } else if ((uint32_t)(now - sound_peak_decay_ms) >= SOUND_PEAK_DECAY_MS) {
-        sound_peak_decay_ms = now;
-        if (sound_bar_peak > 0U) {
-            sound_bar_peak--;
-        }
-    }
-
-    dot = sound_bar_peak;
-    if (dot > top) {
-        dot = top;
-    }
+    /* 白色块始终占据柱顶 SOUND_BAR_CAP 格 */
+    purple = (sound_bar_level > SOUND_BAR_CAP) ?
+             (uint16_t)(sound_bar_level - SOUND_BAR_CAP) : 0U;
 
     for (i = 0; i < length; i++) {
-        index = (uint16_t)((uint32_t)i * 14U / (length - 1U));
-        if ((i < sound_bar_level) || (i == dot)) {
+        if (i >= sound_bar_level) {
+            sound_set_pixel(i, 0, 0, 0);
+        } else if (i >= purple) {
+            sound_set_pixel(i, sound_purple_bar[14][0], sound_purple_bar[14][1],
+                            sound_purple_bar[14][2]);
+        } else {
+            index = (uint16_t)((uint32_t)i * 14U / (length - 1U));
             sound_set_pixel(i, sound_purple_bar[index][0],
                             sound_purple_bar[index][1],
                             sound_purple_bar[index][2]);
-        } else {
-            sound_set_pixel(i, 0, 0, 0);
         }
     }
     sound_state_value = sound_bar_level;
-    return SOUND_FRAME_MS;
+    return SOUND_BAR_FRAME_MS;
 }
 
 /* 14 彩色流水：4 格间距光点向右流动，亮度/拖尾由能量决定 */
