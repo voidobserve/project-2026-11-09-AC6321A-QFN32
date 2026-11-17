@@ -4757,6 +4757,8 @@ extern u16 get_music_adc(void);
 #define SOUND_SILENCE_MS      300U   /* 判定无声的持续时间(ms) */
 #define SOUND_SWEEP_MS        1600U  /* 兜底补跑一轮的时长(ms) */
 #define SOUND_LEVEL_MAX       204U   /* 与定时动画一致的满亮度 */
+#define SOUND_BAR_DECAY_MS    80U    /* 13：柱高无声时每滑落一格的时间(ms) */
+#define SOUND_PEAK_DECAY_MS   400U   /* 13：白色块(峰值保持)每滑落一格的时间(ms) */
 
 /* 串口调试打印：抓 log 标定能量用，量产置 0 */
 #define SOUND_DEBUG_LOG       1
@@ -4839,6 +4841,12 @@ static uint16_t sound_frame_adc;
 static uint16_t sound_frame_raw;
 static uint16_t sound_state_value;
 
+/* 13 的均衡器柱高、峰值保持与滑落计时 */
+static uint16_t sound_bar_level;
+static uint16_t sound_bar_peak;
+static uint32_t sound_bar_decay_ms;
+static uint32_t sound_peak_decay_ms;
+
 #if SOUND_DEBUG_LOG
 static uint32_t sound_last_log_ms;
 static uint16_t sound_adc_min;
@@ -4898,6 +4906,10 @@ static void sound_begin(void)
     sound_last_signal_ms = millis();
     sound_sweep_start_ms = 0U;
     sound_state_value = 0U;
+    sound_bar_level = (uint16_t)(_seg_len / 2U);   /* 13 进入时默认半条，无声再滑落 */
+    sound_bar_peak = sound_bar_level;
+    sound_bar_decay_ms = millis();
+    sound_peak_decay_ms = millis();
 #if SOUND_DEBUG_LOG
     sound_adc_min = 0xFFFFU;
     sound_adc_max = 0U;
@@ -4985,39 +4997,65 @@ static uint8_t sound_guard(uint16_t *energy)
     return 0U;
 }
 
-/* 13 紫色光柱 + 送料光点：柱长由能量决定，光点从远端向柱头走 */
+/* 13 紫色均衡器：底部紫色柱（颜色按位置取，越往上越白）+ 柱顶上方一个白色块；
+ * 柱高随能量即时上升、无声时按 SOUND_BAR_DECAY_MS 滑落；白块是"峰值保持"，
+ * 比柱顶掉得慢，所以悬在上方；进入时柱与白块都在半条处。 */
 uint16_t WS2812FX_mode_sound_purple_bar(void)
 {
     uint16_t energy;
     uint16_t length = _seg_len;
-    uint16_t bar;
+    uint16_t top = (uint16_t)(length - 1U);
+    uint16_t target;
     uint16_t dot;
     uint16_t i;
     uint16_t index;
+    uint32_t now = millis();
 
     sound_begin();
     if (sound_guard(&energy)) {
         return SOUND_FRAME_MS;
     }
 
-    bar = (uint16_t)((uint32_t)energy * length / SOUND_ENERGY_MAX);
-    sound_state_value = bar;
-    dot = (uint16_t)((length - 1U) - (_seg_rt->counter_mode_step % (length - 1U)));
-    _seg_rt->counter_mode_step += 1U;
+    target = (uint16_t)((uint32_t)energy * length / SOUND_ENERGY_MAX);
+    if (target > top) {
+        target = top;
+    }
+    if (target >= sound_bar_level) {              /* 起音：立刻跟上 */
+        sound_bar_level = target;
+        sound_bar_decay_ms = now;
+    } else if ((uint32_t)(now - sound_bar_decay_ms) >= SOUND_BAR_DECAY_MS) {
+        sound_bar_decay_ms = now;                 /* 无信号：逐格滑落 */
+        if (sound_bar_level > 0U) {
+            sound_bar_level--;
+        }
+    }
+
+    if (sound_bar_level >= sound_bar_peak) {      /* 峰值保持：跟涨、慢落 */
+        sound_bar_peak = sound_bar_level;
+        sound_peak_decay_ms = now;
+    } else if ((uint32_t)(now - sound_peak_decay_ms) >= SOUND_PEAK_DECAY_MS) {
+        sound_peak_decay_ms = now;
+        if (sound_bar_peak > 0U) {
+            sound_bar_peak--;
+        }
+    }
+
+    dot = sound_bar_peak;
+    if (dot > top) {
+        dot = top;
+    }
 
     for (i = 0; i < length; i++) {
-        if (i < bar) {
-            index = (uint16_t)((uint32_t)i * 14U / (length - 1U));
+        index = (uint16_t)((uint32_t)i * 14U / (length - 1U));
+        if ((i < sound_bar_level) || (i == dot)) {
             sound_set_pixel(i, sound_purple_bar[index][0],
                             sound_purple_bar[index][1],
                             sound_purple_bar[index][2]);
-        } else if (i == dot) {
-            sound_set_pixel(i, sound_purple_bar[14][0], sound_purple_bar[14][1],
-                            sound_purple_bar[14][2]);
         } else {
             sound_set_pixel(i, 0, 0, 0);
         }
     }
+    sound_state_value = sound_bar_level;
     return SOUND_FRAME_MS;
 }
 
