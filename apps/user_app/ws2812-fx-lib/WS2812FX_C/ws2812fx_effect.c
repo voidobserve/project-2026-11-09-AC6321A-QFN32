@@ -4754,7 +4754,6 @@ extern u16 get_music_adc(void);
 #define SOUND_SLOW_FRAME_MS   70U    /* 阶梯类刷新间隔(ms) */
 #define SOUND_ENERGY_MAX      100U   /* 能量归一化上限 */
 #define SOUND_ADC_SILENCE     10U    /* 静音门槛，与 sound_handle() 一致 */
-#define SOUND_ADC_FULL        16000U /* 满量程：与 music_voice[21] 的上限(16049)对齐 */
 #define SOUND_SILENCE_MS      300U   /* 判定无声的持续时间(ms) */
 #define SOUND_SWEEP_MS        1600U  /* 兜底补跑一轮的时长(ms) */
 #define SOUND_LEVEL_MAX       204U   /* 与定时动画一致的满亮度 */
@@ -4812,6 +4811,40 @@ static const int8_t sound_dot_steps[12][2] = {
     {9, -1}, {10, -1}, {11, -1}, {12, -1}, {13, -1}, {-1, -1}
 };
 
+/* adc -> 能量(0~100) 的分段标定表（按实测标定，见 .agents/说明.md 的 [SND] 日志）
+ * 800 以下=暂停底噪；6000=中小音量；9000=上位机 11~13 档；16000=满音量 */
+static const uint16_t sound_adc_lut[][2] = {
+    {  800U,   0U},
+    { 6000U,  22U},
+    { 9000U,  40U},
+    {12000U,  62U},
+    {16000U, 100U}
+};
+#define SOUND_ADC_LUT_COUNT \
+    ((uint16_t)(sizeof(sound_adc_lut) / sizeof(sound_adc_lut[0])))
+
+/* 查表线性插值；低于表头按 0，高于表尾按 100 */
+static uint16_t sound_energy_from_adc(uint16_t adc)
+{
+    uint16_t i;
+    uint16_t span;
+    uint16_t low;
+
+    if (adc <= sound_adc_lut[0][0]) {
+        return 0U;
+    }
+    for (i = 1U; i < SOUND_ADC_LUT_COUNT; i++) {
+        if (adc <= sound_adc_lut[i][0]) {
+            span = (uint16_t)(sound_adc_lut[i][0] - sound_adc_lut[i - 1U][0]);
+            low = sound_adc_lut[i - 1U][1];
+            return (uint16_t)(low +
+                              (uint32_t)(adc - sound_adc_lut[i - 1U][0]) *
+                              (sound_adc_lut[i][1] - low) / span);
+        }
+    }
+    return SOUND_ENERGY_MAX;
+}
+
 /* 声控公共状态 */
 static uint16_t sound_energy_filtered;
 static uint32_t sound_last_signal_ms;
@@ -4859,8 +4892,9 @@ static void sound_begin(void)
 #if SOUND_DEBUG_LOG
     sound_adc_max = 0U;
     sound_last_log_ms = millis();
-    printf("\n[SND] begin mode=%u silence=%u full=%u sweep=%u\n",
-           (uint16_t)fc_effect.color_i, SOUND_ADC_SILENCE, SOUND_ADC_FULL,
+    printf("\n[SND] begin mode=%u lut=%u..%u silence=%u sweep=%u\n",
+           (uint16_t)fc_effect.color_i, sound_adc_lut[0][0],
+           sound_adc_lut[SOUND_ADC_LUT_COUNT - 1U][0], SOUND_ADC_SILENCE,
            SOUND_SWEEP_MS);
 #endif
 }
@@ -4875,13 +4909,16 @@ static uint8_t sound_guard(uint16_t *energy)
     uint32_t elapsed;
 
     if (adc > SOUND_ADC_SILENCE) {
-        uint16_t raw = (uint16_t)((uint32_t)(adc - SOUND_ADC_SILENCE) *
-                                  SOUND_ENERGY_MAX /
-                                  (SOUND_ADC_FULL - SOUND_ADC_SILENCE));
-        if (raw > SOUND_ENERGY_MAX) {
-            raw = SOUND_ENERGY_MAX;
+        uint16_t raw = sound_energy_from_adc(adc);
+
+        /* 快起慢落：起音 3/4 跟新值，回落 3/4 保留旧值 */
+        if (raw > sound_energy_filtered) {
+            sound_energy_filtered = (uint16_t)((sound_energy_filtered +
+                                                raw * 3U) / 4U);
+        } else {
+            sound_energy_filtered = (uint16_t)((sound_energy_filtered * 3U +
+                                                raw) / 4U);
         }
-        sound_energy_filtered = (uint16_t)((sound_energy_filtered * 3U + raw) / 4U);
         sound_last_signal_ms = now;
         sound_fallback_stage = 0U;
         *energy = sound_energy_filtered;
