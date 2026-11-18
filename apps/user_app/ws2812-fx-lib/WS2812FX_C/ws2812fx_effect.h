@@ -1,7 +1,7 @@
 #ifndef ws2812fx_effect_h
 #define ws2812fx_effect_h
 
-uint16_t WS2812FX_multiColor_wipe(uint8_t rev) ;
+uint16_t WS2812FX_multiColor_wipe(uint8_t is_reverse, uint8_t rev);
 
 
 // builtin modes
@@ -109,6 +109,10 @@ uint16_t
   WS2812FX_mode_hue_rotate_glow(void),
   WS2812FX_mode_seven_color_jump(void),
   WS2812FX_mode_rainbow_band_flow(void);
+
+/* 声控测试开关：1=只在声控模式 13~18 之间循环（跳过其它效果），
+ * 同时打开 [SND] 调试打印；量产与正式测试前都置 0 */
+#define SOUND_MODE_TEST_ENABLE    0
 
 /* 样机 6 个声控动画（规格：样机信号采集/01-分析结果/声控模式总规格.md），
  * 顺序与旧协议动态模式 color_i 13~18 一一对应 */

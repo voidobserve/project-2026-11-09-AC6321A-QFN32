@@ -2233,6 +2233,11 @@ static void legacy_ws_mode_apply(void)
         // 0~12 样机动画 + 13~18 声控模式，越界回到 0
         fc_effect.color_i = 0;
     }
+#if SOUND_MODE_TEST_ENABLE
+    if (fc_effect.color_i < SOUND_MODE_FIRST) {
+        fc_effect.color_i = SOUND_MODE_FIRST;   /* 测试：只跑声控模式 */
+    }
+#endif
 
     if (fc_effect.color_i < 13) { 
         // 0 ~ 12，样机对应的幻彩灯动画
@@ -2259,7 +2264,11 @@ void legacy_ws_mode_next(void)
     fc_effect.color_i++;
     if (fc_effect.color_i > SOUND_MODE_LAST) {
         // 0~12 样机动画 + 13~18 声控模式，循环回 0
+#if SOUND_MODE_TEST_ENABLE
+        fc_effect.color_i = SOUND_MODE_FIRST;
+#else
         fc_effect.color_i = 0;
+#endif
     }
 
     legacy_ws_mode_apply();
