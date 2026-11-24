@@ -1826,7 +1826,7 @@ void legacy_rgb_mode_next(void)
 /* 动画实现在 ws2812fx_effect.c 末尾；顺序与旧协议 color_i 0~12 一一对应 */
 static const mode_ptr prototype_animations[] = {
     &WS2812FX_mode_orange_inward_fill,      /* 00 橙色，两端向中间填充 */
-    &WS2812FX_mode_magenta_stack_up,        /* 01 品红，堆积 */
+    &WS2812FX_mode_magenta_stack_up,        /* 01 品红，堆积（每轮换色，12 色） */
     &WS2812FX_mode_green_wave_flow,         /* 02 绿色，阶梯流水 */
     &WS2812FX_mode_orange_dot_flow,         /* 03 橙色，单点流水 */
     &WS2812FX_mode_white_blue_flow,         /* 04 白-蓝-白，流水 */

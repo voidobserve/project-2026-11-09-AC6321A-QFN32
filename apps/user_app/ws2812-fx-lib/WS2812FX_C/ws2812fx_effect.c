@@ -4109,6 +4109,7 @@ uint16_t f_longmeteor_signle_blink(void)
 #define ANIM_STEP_370_8          3708U  /* 370.78 ms/步(规格 §12) */
 #define ANIM_FILL_PERIOD         7920U  /* 00 固定周期 792 ms，单位 0.1 ms */
 #define ANIM_STACK_PERIOD        66840U /* 01 固定周期 6684 ms，单位 0.1 ms */
+#define ANIM_STACK_COLORS        12U    /* 01 每完成一轮换一种颜色，共 12 色 */
 #define ANIM_BREATH_STEPS        202U   /* 呼吸类每段步数(规格 §8~§10) */
 #define ANIM_BREATH_HALF         101U   /* 三角波半周期(步) */
 #define ANIM_BREATH_COLORS       7U     /* 07 共 7 段颜色 */
@@ -4145,10 +4146,21 @@ static const uint8_t orange_fill_colors[2][3] = {
     {204,  60,   0}    /* 橙 */
 };
 
-/* 01：品红与熄灭两种像素值 */
-static const uint8_t magenta_colors[2][3] = {
-    {  0,   0,   0},   /* 黑 */
-    {159,   0,  84}    /* 品红 */
+/* 01：12 色轮换表，色相按 30° 等分铺满色相环，亮度统一取满值 204。
+ * 第 1 色的色相与原样机品红 (159,0,84) 一致（328°），仅等比提亮到满值。 */
+static const uint8_t stack_up_colors[ANIM_STACK_COLORS][3] = {
+    {204,   0, 102},   /*  1 玫红 */
+    {204,   0,   0},   /*  2 红 */
+    {204, 102,   0},   /*  3 橙 */
+    {204, 204,   0},   /*  4 黄 */
+    {102, 204,   0},   /*  5 黄绿 */
+    {  0, 204,   0},   /*  6 绿 */
+    {  0, 204, 102},   /*  7 青绿 */
+    {  0, 204, 204},   /*  8 青 */
+    {  0, 102, 204},   /*  9 天蓝 */
+    {  0,   0, 204},   /* 10 蓝 */
+    {102,   0, 204},   /* 11 紫 */
+    {204,   0, 204}    /* 12 品红 */
 };
 
 /* 02：绿通道阶梯图样，与 N 无关 */
@@ -4248,18 +4260,23 @@ static uint32_t animation_elapsed_ms(void)
     return (uint32_t)(millis() - animation_start_ms);
 }
 
-/* 已用时间换算成步号。step_tenths 是规格步长（0.1 ms 为单位），
- * cycle 为 0 表示不按周期取模。 */
-static uint32_t animation_step(uint16_t step_tenths, uint32_t cycle)
+/* 已用时间换算成累计步号（不取模）。step_tenths 是规格步长（0.1 ms 为单位）。 */
+static uint32_t animation_step_abs(uint16_t step_tenths)
 {
     uint32_t scaled = (uint32_t)step_tenths * animation_speed_scale() /
                       ANIM_SPEED_BASE;
-    uint32_t step;
 
     if (scaled == 0U) {
         scaled = 1U;
     }
-    step = animation_elapsed_ms() * ANIM_TENTHS_PER_MS / scaled;
+    return animation_elapsed_ms() * ANIM_TENTHS_PER_MS / scaled;
+}
+
+/* 已用时间换算成步号。cycle 为 0 表示不按周期取模。 */
+static uint32_t animation_step(uint16_t step_tenths, uint32_t cycle)
+{
+    uint32_t step = animation_step_abs(step_tenths);
+
     if (cycle != 0U) {
         step %= cycle;
     }
@@ -4493,26 +4510,31 @@ uint16_t WS2812FX_mode_orange_inward_fill(void)
     return ANIM_FRAME_MS;
 }
 
-/* 01 品红·堆积：光点从远端送料，光柱在 LED0 侧逐格长高，满格后从顶端塌陷。
- * 步数 S = N(N+3)/2；N<=25（本工程 16 颗）时周期固定 6684 ms（规格 §2）。 */
+/* 01 堆积：光点从远端送料，光柱在 LED0 侧逐格长高，满格后从顶端塌陷。
+ * 步数 S = N(N+3)/2；N<=25（本工程 16 颗）时周期固定 6684 ms（规格 §2）。
+ * 每完成一整轮换一种颜色，12 色循环；一轮的末帧全灭，换色正好落在黑场上，
+ * 所以按硬切处理，不加过渡。 */
 uint16_t WS2812FX_mode_magenta_stack_up(void)
 {
     uint16_t length = _seg_len;
     uint32_t cycle = (uint32_t)length * (length + 3U) / 2U;
     uint16_t step_tenths = (uint16_t)(ANIM_STACK_PERIOD / cycle);
-    uint32_t step;
+    uint32_t absolute;
     uint32_t mask;
+    const uint8_t *color;
     uint16_t i;
     uint8_t lit;
 
     animation_begin(0);
-    step = animation_step(step_tenths, cycle);
-    mask = magenta_mask_at(step, length);
+    absolute = animation_step_abs(step_tenths);
+    mask = magenta_mask_at(absolute % cycle, length);
+    color = stack_up_colors[(absolute / cycle) % ANIM_STACK_COLORS];
 
     for (i = 0; i < length; i++) {
         lit = (uint8_t)((mask >> i) & 1U);
-        animation_set_pixel(i, magenta_colors[lit][0], magenta_colors[lit][1],
-                            magenta_colors[lit][2]);
+        animation_set_pixel(i, (uint8_t)(lit ? color[0] : 0U),
+                            (uint8_t)(lit ? color[1] : 0U),
+                            (uint8_t)(lit ? color[2] : 0U));
     }
     return ANIM_FRAME_MS;
 }

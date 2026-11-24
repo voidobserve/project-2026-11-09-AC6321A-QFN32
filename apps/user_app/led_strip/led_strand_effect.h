@@ -86,7 +86,7 @@ typedef enum
   /* 样机 13 个幻彩动画（规格：样机信号采集/AI-动画总规格.md），
    * 顺序与旧协议动态模式 color_i 0~12 一一对应 */
   MODE_ORANGE_INWARD_FILL = 110,   // 00 橙色，两端向中间填充
-  MODE_MAGENTA_STACK_UP,           // 01 品红，堆积
+  MODE_MAGENTA_STACK_UP,           // 01 品红，堆积（每轮换色，12 色）
   MODE_GREEN_WAVE_FLOW,            // 02 绿色，阶梯流水
   MODE_ORANGE_DOT_FLOW,            // 03 橙色，单点流水
   MODE_WHITE_BLUE_FLOW,            // 04 白-蓝-白，流水
